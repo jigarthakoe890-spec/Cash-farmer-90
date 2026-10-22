@@ -48,7 +48,7 @@ APPWRITE_DATABASE_ID = "6a0c59ac002413005872"
 APPWRITE_API_KEY = "standard_8e05de023d2eeebe5292137816c5f400e6a1749ff3b4594b9e42cab0407ae31cacbe197bb1b262b481a78fcbe7bcf187b86e5d2e37a3e827fd045604f4d39e5722bb6d529a259c8a43b52e16f38699d2377d055fa96b3498aef572c3e65d85350411d5a5418644d0aca4d8fff769046e87ea9d5397c1793ce11bf28e215f4ba4"
 
 # ImgBB ની નવી કી (જૂની કી રદ કરો)
-IMGBB_API_KEY = "6784ee6176d6cc982122976dd44dd3a7"
+IMGBB_API_KEY = "8c5b5ce8657dbaa910dc1d2f2a1feef2"
 
 # લોગિન ટોકન સાચા છે કે નકલી તે ચકાસવા માટેનું ગુપ્ત લખાણ (મેં બનાવી આપ્યું છે, બદલવું જરૂરી નથી)
 SECRET_KEY = "1cee97246f1da3872c21ce3601ae4706aa484f93bb5ad6ec8d21ba0e616d4dc9"
@@ -1484,6 +1484,25 @@ def upload_photo(data, filename, mimetype):
     except Exception as e:  # noqa
         log.warning("ફોટો અપલોડ નિષ્ફળ: %s", e.__class__.__name__)
     return None
+
+
+@app.post("/api/upload-photo")
+@auth_required
+def upload_photo_route():
+    if not IMGBB_KEY:
+        return err("Photo upload is not configured on the server", 500)
+    f = request.files.get("image")
+    if not f:
+        return err("Photo missing")
+    data = f.read()
+    if not (f.mimetype or "").startswith("image/") or not data:
+        return err("Only image files are allowed")
+    if len(data) > MAX_PHOTO_BYTES:
+        return err("Each photo must be under 8 MB")
+    url = upload_photo(data, f.filename, f.mimetype)
+    if not url:
+        return err("Photo upload failed. Try again", 502)
+    return jsonify({"url": url})
 
 
 @app.post("/api/submit-task")
