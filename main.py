@@ -2768,4 +2768,4 @@ if __name__ == "__main__":
     log.info("HTML ફોલ્ડર: %s", PUBLIC_DIR)
     if not os.path.isfile(os.path.join(PUBLIC_DIR, "index.html")):
         log.warning("આ ફોલ્ડરમાં index.html મળી નથી! PUBLIC_FOLDER માં સાચું સરનામું લખો.")
-    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", 5000)), threaded=True)
+    app.run(host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", 5000)), threaded=True)
