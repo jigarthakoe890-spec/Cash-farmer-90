@@ -1957,16 +1957,59 @@ SAFE_EXT = {".html", ".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".
             ".ttf", ".woff", ".woff2", ".mp3", ".mp4", ".json", ".txt"}
 
 
+def real_ip():
+    # Render / Cloudflare પાછળ અસલી IP હેડરમાં હોય છે
+    ip = request.headers.get("CF-Connecting-IP")
+    if not ip:
+        ip = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return ip or request.remote_addr or "unknown"
+
+
+# ખોટા પેજ વારંવાર ખોલનારા IP ને થોડા સમય માટે રોકવા
+BAD_HIT_LIMIT = 10        # આટલી ખોટી રિક્વેસ્ટ
+BAD_HIT_WINDOW = 60       # આટલા સેકન્ડમાં થાય તો
+BAD_BLOCK_SECONDS = 900   # ૧૫ મિનિટ બ્લોક
+_bad_hits = defaultdict(list)
+_blocked_until = {}
+
+
+def is_blocked(ip):
+    until = _blocked_until.get(ip)
+    if until and until > time.time():
+        return True
+    _blocked_until.pop(ip, None)
+    return False
+
+
+def register_bad_hit(ip):
+    now = time.time()
+    hits = [t for t in _bad_hits[ip] if now - t < BAD_HIT_WINDOW]
+    hits.append(now)
+    _bad_hits[ip] = hits
+    if len(hits) >= BAD_HIT_LIMIT:
+        _blocked_until[ip] = now + BAD_BLOCK_SECONDS
+        _bad_hits.pop(ip, None)
+    if len(_bad_hits) > 5000:  # યાદ ભરાઈ ન જાય
+        _bad_hits.clear()
+    if len(_blocked_until) > 5000:
+        _blocked_until.clear()
+
+
 def not_found_page():
-    msg = "Not found"
-    if request.remote_addr in ("127.0.0.1", "::1"):
-        msg += f"\n\nHTML ફોલ્ડર જ્યાં સર્વર શોધે છે: {PUBLIC_DIR}\nઆ ફોલ્ડરમાં index.html અને loginpage.html હોવી જોઈએ."
+    ip = real_ip()
+    register_bad_hit(ip)
+    msg = ("Access Denied\n\n"
+           "This page is restricted. Unauthorized access is prohibited.\n"
+           "If you reached this page by mistake, please close it now.")
     return msg, 404, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.route("/", defaults={"path": ""})
 @app.route("/<path:path>")
 def serve(path):
+    if is_blocked(real_ip()):
+        return ("Too many requests. Try again later.", 429,
+                {"Content-Type": "text/plain; charset=utf-8", "Retry-After": str(BAD_BLOCK_SECONDS)})
     if path.startswith("api/"):
         return err("Not found", 404)
     if path and os.path.splitext(path)[1].lower() in SAFE_EXT:
