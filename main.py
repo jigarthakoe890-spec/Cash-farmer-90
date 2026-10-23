@@ -2346,19 +2346,44 @@ def tg_proof_chat():
     return int(cid) if cid.lstrip("-").isdigit() else cid
 
 
+def tg_notify_owner_proof_failed(user_doc, prize, reason):
+    """પુરાવો ગ્રુપમાં ન જઈ શક્યો તો માલિકને અંગત સંદેશ મોકલે, જેથી માલિક જાતે પુરાવો મૂકી શકે."""
+    try:
+        owner = tg_owner_id()
+        if not owner:
+            log.warning("પુરાવો ન ગયો અને માલિકની id નક્કી નથી, એટલે જાણ થઈ શકી નહીં")
+            return
+        tg_send(owner, (f"⚠️ Proof NOT posted\n\nReason: {reason}\n\n"
+                        f"👤 Nickname: {user_doc.get('user_nickname') or 'User'}\n"
+                        f"📧 Gmail: {user_doc.get('user_gmail_account') or ''}\n"
+                        f"💰 Reward: ₹{float(prize):.2f}\n📌 Task: {TELEGRAM_TASK_NAME}\n\n"
+                        f"Reward was already credited. Please post this proof manually."))
+    except Exception as e:  # noqa
+        log.warning("માલિકને પુરાવાની નિષ્ફળતાની જાણ ન થઈ શકી: %s", e)
+
+
 def tg_post_proof(user_doc, prize):
-    """ઇનામ મળ્યા પછી ઉપનામ, જીમેલ અને રકમ પુરાવાના ગ્રુપમાં મોકલે."""
+    """ઇનામ મળ્યા પછી ઉપનામ, જીમેલ અને રકમ પુરાવાના ગ્રુપમાં મોકલે.
+    નિષ્ફળ જાય તો ૩ વાર પ્રયાસ કરે, છતાં ન જાય તો માલિકને અંગત સંદેશ મોકલે."""
     chat = tg_proof_chat()
     if not chat:
         log.warning("પુરાવાનું ગ્રુપ નક્કી નથી: ગ્રુપમાં /setproof@CashFarmers_03bot લખો")
-        return
+        tg_notify_owner_proof_failed(user_doc, prize, "Proof group is not set")
+        return False
     email = str(user_doc.get("user_gmail_account") or "")
     if TELEGRAM_PROOF_MASK_EMAIL and "@" in email:
         name, dom = email.split("@", 1)
         email = name[:2] + "*" * max(len(name) - 2, 1) + "@" + dom
     text = (f"✅ Reward Credited\n\n👤 Nickname: {user_doc.get('user_nickname') or 'User'}\n"
             f"📧 Gmail: {email}\n💰 Reward: ₹{prize:.2f}\n📌 Task: {TELEGRAM_TASK_NAME}")
-    tg_api("sendMessage", chat_id=chat, text=text)
+    for attempt in range(3):
+        if tg_api("sendMessage", chat_id=chat, text=text):
+            return True
+        if attempt < 2:
+            time.sleep(2 * (attempt + 1))   # ૨ સેકન્ડ, પછી ૪ સેકન્ડ રાહ જોઈ ફરી પ્રયાસ
+    log.warning("પુરાવો ૩ પ્રયાસ પછી પણ ગ્રુપમાં ન ગયો (%s)", user_doc.get("user_gmail_account"))
+    tg_notify_owner_proof_failed(user_doc, prize, "Telegram rejected or failed 3 times (check bot is admin in proof group)")
+    return False
 
 
 def tg_give_reward(user):
@@ -2464,6 +2489,7 @@ def tg_give_reward(user):
             tg_post_proof(user_doc, prize)
         except Exception as e:  # noqa
             log.warning("પુરાવાના ગ્રુપમાં મોકલી ન શકાયું: %s", e)
+            tg_notify_owner_proof_failed(user_doc, prize, f"Unexpected error: {e.__class__.__name__}")
         # [નવું] મિત્રના અલગ ૩ ઓફર પૂરા થયા હોય તો રેફર ઇનામ (યાદમાં ગણતરી)
         try:
             referral_progress(uid, fresh, task.get("offer_taskname") or TELEGRAM_TASK_NAME, prize)
