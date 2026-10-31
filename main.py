@@ -36,6 +36,61 @@ log = logging.getLogger("cashfarmer")
 
 
 # ----------------------------------------------------------------------------
+# [નવું] લાઇવ લૉગ: ટર્મિનલમાં જે દેખાય તે જ મેમરીમાં સાચવાય, વેબસાઇટનું લૉગ પાનું તે વાંચે.
+# હોસ્ટ (Render / gunicorn) પર ટર્મિનલ ન જોવાય તો પણ લૉગ તમારી વેબસાઇટમાં દેખાશે.
+# ફક્ત છેલ્લા 3000 લૉગ મેમરીમાં રહે છે. સર્વર ફરી ચાલુ થાય ત્યારે જૂના લૉગ જતા રહે.
+# ----------------------------------------------------------------------------
+from collections import deque
+
+_LIVE_LOGS = deque(maxlen=3000)
+_LIVE_LOCK = threading.Lock()
+_LIVE_ID = 0
+_LIVE_TZ = timezone(timedelta(minutes=int(os.environ.get("LOG_TZ_MINUTES", "330"))))  # ભારતનો સમય (+5:30)
+
+
+def _live_stamp():
+    now = datetime.now(_LIVE_TZ)
+    return now.strftime("%Y-%m-%d %H:%M:%S") + ",%03d" % (now.microsecond // 1000), now.strftime("%d/%b/%Y %H:%M:%S")
+
+
+def _live_add(parts):
+    """parts = [[લખાણ, રંગ], ...]  રંગ: "" (સફેદ), red, green, yellow, cyan"""
+    global _LIVE_ID
+    with _LIVE_LOCK:
+        _LIVE_ID += 1
+        _LIVE_LOGS.append({"id": _LIVE_ID, "p": parts})
+
+
+class _LiveHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            msg = re.sub(r"\x1b\[[0-9;]*m", "", record.getMessage())
+            if record.name == "werkzeug" and re.search(r'"[A-Z]+ [^"]* HTTP/[\d.]+" \d{3}', msg):
+                return  # વિનંતીની લાઇન નીચેના after_request માંથી જ બને છે (બે વાર ન આવે)
+            head = _live_stamp()[0] + " " + record.levelname + " "
+            color = ""
+            if "Press CTRL+C" in msg:
+                color = "yellow"
+            elif "development server" in msg:
+                color = "red"
+            _live_add([[head, ""], [msg, color]])
+        except Exception:  # noqa
+            pass
+
+
+class _SkipLogPoll(logging.Filter):
+    def filter(self, record):  # લૉગ પાનું વારંવાર માંગે તેની લાઇન ટર્મિનલમાં પણ ન આવે
+        try:
+            return "/api/admin/logs" not in record.getMessage()
+        except Exception:  # noqa
+            return True
+
+
+logging.getLogger("werkzeug").addFilter(_SkipLogPoll())
+logging.getLogger().addHandler(_LiveHandler())
+
+
+# ----------------------------------------------------------------------------
 # ગુપ્ત સેટિંગ: બધી કી અને ID અહીં જ લખો
 # (આ ફાઈલ `public` ફોલ્ડરમાં નથી, એટલે વપરાશકર્તા તેને જોઈ શકતો નથી.
 #  પણ આ ફાઈલ કોઈને મોકલશો નહીં અને ગિટહબ/ટેલિગ્રામ પર મૂકશો નહીં.)
@@ -94,10 +149,10 @@ C_OFFERS = "offer_list"
 MIN_WITHDRAW = 5
 MAX_WITHDRAW = 999
 FEE_PERCENT = 2        # ફી ૨%
-FEE_FREE_BELOW = 30    # આટલાથી ઓછી રકમ પર ફી નથી, આટલી કે તેથી વધુ પર ફી લાગે
+FEE_FREE_BELOW = 0     # [બદલ્યું: ૩૦ → ૦] હવે દરેક રકમ પર ૨% ફી કપાય છે, કોઈ રકમ ફી વગરની નથી
 
 # રેફરલ ઇનામ (લેવલ પ્રમાણે) અને જરૂરી ટાસ્ક (મિત્રના અલગ અલગ ઓફર મંજૂર થયા હોય)
-REFER_REWARDS = {1: 40, 2: 5, 3: 2}
+REFER_REWARDS = {1: 40, 2: 10, 3: 3}   # [બદલ્યું] લેવલ ૨ = ₹૧૦, લેવલ ૩ = ₹૩
 REFER_MIN_PRIZE = 40       # [નવું] રેફર ગણતરીમાં ફક્ત આટલા કે તેથી વધુ ઇનામ વાળા ટાસ્ક ગણાય (૩૯ કે ઓછા નહીં)
 REFER_TASKS_NEEDED = 2   # [બદલ્યું: ૩ → ૨] ટેલિગ્રામ સિવાયના ૨ અલગ ટાસ્ક મંજૂર થાય ત્યારે રેફર ઇનામ
 REFER_CHECK_SECONDS = 1800  # બધાને તપાસતું ધીમું ચક્ર (હમણાં બંધ છે, નીચે NO_BACKGROUND જુઓ)
@@ -106,9 +161,13 @@ REFER_CHECK_SECONDS = 1800  # બધાને તપાસતું ધીમુ
 # આ ફક્ત સલામતી માટે છે (કન્સોલમાં સીધા ફેરફાર થયા હોય તો ક્યારેક સુધરી જાય).
 REFER_MEM_SECONDS = 43200
 REFER_MEM_MAX_USERS = 500     # એક સાથે વધુમાં વધુ આટલા રેફર કરનારની યાદી યાદમાં રહે
-OFFERS_CACHE_SECONDS = 21600  # ઓફરોની યાદી સર્વર આટલા સેકન્ડ (૬ કલાક) યાદ રાખે (reads બચાવવા). નવી ઓફર તરત બતાવવી હોય તો સર્વર ફરી ચાલુ કરો
-USER_CACHE_SECONDS = 1800  # વપરાશકર્તાના ટાસ્ક અને ઇતિહાસની યાદી સર્વર આટલા સેકન્ડ (૩૦ મિનિટ) યાદ રાખે (ફક્ત સ્ક્રીન બતાવવા માટે)
+OFFERS_CACHE_SECONDS = 46800  # ઓફરોની યાદી સર્વર આટલા સેકન્ડ (૧૩ કલાક) યાદ રાખે (reads બચાવવા). નવી ઓફર તરત બતાવવી હોય તો સર્વર ફરી ચાલુ કરો
+USER_CACHE_SECONDS = 43200  # વપરાશકર્તાના ટાસ્ક અને ઇતિહાસની યાદી સર્વર આટલા સેકન્ડ (૧૨ કલાક) યાદ રાખે (ફક્ત સ્ક્રીન બતાવવા માટે)
 AUTH_CACHE_SECONDS = 1800  # લોગિન ચકાસવા અને બેલેન્સ બતાવવા માટે યુઝરની રો સર્વર આટલા સેકન્ડ (૩૦ મિનિટ) યાદ રાખે
+# [નવું] ઇતિહાસમાં "વધુ જુઓ" થી ખુલેલાં પાનાં સર્વર આટલા સેકન્ડ (૩ કલાક ૩ મિનિટ) યાદ રાખે
+HISTORY_MORE_MEM_SECONDS = 3 * 3600 + 3 * 60
+# [નવું] રેફરમાં માંગેલાં પાનાં (મિશ્ર / લેવલ ૧-૩) સર્વર આટલા સેકન્ડ (૩ કલાક ૩ મિનિટ) યાદ રાખે
+REFER_PAGE_MEM_SECONDS = 3 * 3600 + 3 * 60
 STATS_SYNC_MIN_SECONDS = 300  # એક વપરાશકર્તાના આંકડા /api/sync-stats થી આટલા સેકન્ડે એક જ વાર ગણાય
 
 # તરત સંદેશ મોકલવાનું ખુલ્લું જોડાણ (/api/stream) - ટાસ્ક મંજૂર કે રેફર ઇનામ મળે ત્યારે એપમાં તરત દેખાય
@@ -121,7 +180,7 @@ HISTORY_PUSH_LIMIT = 7        # HTML ના HISTORY_PAGE_SIZE જેટલું
 # ઉપાડ સ્ક્રીનના ઝડપી રકમ બટન
 QUICK_AMOUNTS = [5, 10, 499]
 
-TOKEN_MAX_AGE = 30 * 24 * 3600  # લોગિન ૩૦ દિવસ ચાલે
+TOKEN_MAX_AGE = 6 * 24 * 3600  # લોગિન ૬ દિવસ ચાલે
 MAX_PHOTOS = 4
 MAX_PHOTO_BYTES = 8 * 1024 * 1024
 
@@ -161,6 +220,27 @@ _AW_HEADERS = {
 }
 
 
+_read_total = 0
+_read_lock = threading.Lock()
+
+
+def _show_total(total=None):
+    if total is None:
+        total = _read_total
+    _live_add([[f"કુલ Appwrite read વપરાયા: {total}", "green"]])
+    print(f"\033[92mકુલ Appwrite read વપરાયા: {total}\033[0m", flush=True)
+
+
+def _count_read(data):
+    """એપરાઈટમાંથી જેટલા ડોક્યુમેન્ટ વંચાય તેટલા કુલ સંખ્યામાં ઉમેરે અને ટર્મિનલમાં બતાવે."""
+    global _read_total
+    n = len(data.get("documents", [])) if isinstance(data, dict) and "documents" in data else 1
+    with _read_lock:
+        _read_total += n
+        total = _read_total
+    _show_total(total)
+
+
 def _call(method, path, **kwargs):
     url = f"{ENDPOINT}/databases/{DATABASE_ID}{path}"
     try:
@@ -169,7 +249,10 @@ def _call(method, path, **kwargs):
         raise AppwriteError(f"network error: {e.__class__.__name__}", 503)
     if r.status_code >= 400:
         raise AppwriteError(f"{r.status_code}: {r.text[:300]}", r.status_code)
-    return r.json() if r.text else {}
+    data = r.json() if r.text else {}
+    if method == "GET":
+        _count_read(data)
+    return data
 
 
 def q(method, attribute=None, values=None):
@@ -409,15 +492,76 @@ def get_user_for_auth(uid):
     return dict(doc)
 
 
+# ----------------------------------------------------------------------------
+# [નવું] લોગિન ટોકન HttpOnly કૂકીમાં: સર્વર પોતે કૂકી આપે, જાહેરાતની સ્ક્રિપ્ટ તેને વાંચી શકે નહીં
+# ----------------------------------------------------------------------------
+COOKIE_NAME = "cf_auth"
+# આ બે વેબસાઇટને જ કૂકી સાથે ડેટા લેવા / ફેરફાર કરવા / ભૂંસવાની છૂટ (Render માં EXTRA_ORIGINS થી વધારાની મૂકી શકાય)
+ALLOWED_ORIGINS = {
+    "https://cashfarmer.netlify.app",
+    "https://cashfaremer.netlify.app",
+}
+ALLOWED_ORIGINS.update(o.strip().rstrip("/") for o in (os.environ.get("EXTRA_ORIGINS") or "").split(",") if o.strip())
+
+
+def origin_allowed(origin):
+    origin = (origin or "").strip().rstrip("/")
+    if not origin:
+        return False
+    if origin in ALLOWED_ORIGINS:
+        return True
+    return origin.split("://", 1)[-1] == request.host  # સર્વર પોતે જ HTML આપે ત્યારે
+
+
+def _is_https():
+    fwd = (request.headers.get("X-Forwarded-Proto") or "").split(",")[0].strip().lower()
+    return request.is_secure or fwd == "https"
+
+
+def _set_auth_cookie(resp, token):
+    if _is_https():  # બીજી વેબસાઇટ (Netlify) થી ચાલે એટલે SameSite=None + Secure
+        resp.set_cookie(COOKIE_NAME, token, max_age=TOKEN_MAX_AGE, httponly=True, secure=True, samesite="None", path="/")
+    else:  # ફક્ત લોકલ ટેસ્ટ (http)
+        resp.set_cookie(COOKIE_NAME, token, max_age=TOKEN_MAX_AGE, httponly=True, secure=False, samesite="Lax", path="/")
+    return resp
+
+
+def _clear_auth_cookie(resp):
+    if _is_https():
+        resp.set_cookie(COOKIE_NAME, "", max_age=0, expires=0, httponly=True, secure=True, samesite="None", path="/")
+    else:
+        resp.set_cookie(COOKIE_NAME, "", max_age=0, expires=0, httponly=True, secure=False, samesite="Lax", path="/")
+    return resp
+
+
+def _err_clear_cookie(message, status):
+    resp = jsonify({"error": message})
+    resp.status_code = status
+    return _clear_auth_cookie(resp)
+
+
 def auth_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         header = request.headers.get("Authorization", "")
-        if not header.startswith("Bearer "):
+        # [નવું] હેડરમાં અસલી ટોકન હોય તો તે વપરાય; "Bearer cookie" કે ખાલી હોય તો HttpOnly કૂકી વપરાય
+        raw = header[7:] if header.startswith("Bearer ") else ""
+        from_cookie = False
+        if not raw or raw == "cookie":
+            raw = request.cookies.get(COOKIE_NAME, "")
+            from_cookie = bool(raw)
+        if not raw:
             return err("Please login first", 401)
+        if from_cookie and request.method not in ("GET", "HEAD", "OPTIONS"):
+            # CSRF થી બચાવ: કૂકીથી ફેરફાર ફક્ત માન્ય વેબસાઇટ પરથી જ
+            _o = request.headers.get("Origin")
+            if _o and not origin_allowed(_o):
+                return err("Request blocked", 403)
         try:
-            data = serializer.loads(header[7:], max_age=TOKEN_MAX_AGE)
+            data = serializer.loads(raw, max_age=TOKEN_MAX_AGE)
         except (BadSignature, SignatureExpired):
+            if from_cookie:
+                return _err_clear_cookie("Session expired. Please login again", 401)
             return err("Session expired. Please login again", 401)
         try:
             user = get_user_for_auth(data["id"])
@@ -575,6 +719,58 @@ def cached_user_list(kind, email, loader):
     return docs
 
 
+# ----------------------------------------------------------------------------
+# [નવું] ઇતિહાસમાં "વધુ જુઓ" દબાવતાં ખુલતાં પાનાં ૩ કલાક ૩ મિનિટ સુધી યાદ રાખવા માટે
+#   યાદ ટુકડામાં રહે છે (શરૂઆત -> નોંધો). માંગેલી નોંધ યાદના ટુકડા જોડીને અપાય છે,
+#   ફક્ત જે નોંધ યાદમાં નથી તે જ ડેટાબેઝમાંથી વંચાય છે (એક જ નોંધ બે વાર વંચાતી નથી).
+# ----------------------------------------------------------------------------
+_hist_more = {}          # ઇમેઇલ -> {શરૂઆત: (સમય, નોંધો, હજી_નોંધ_છે)}
+_hist_more_dropped = {}  # ઇમેઇલ -> છેલ્લે ક્યારે ભૂંસ્યું
+_hist_more_lock = threading.Lock()
+
+
+def cached_history_more(email, limit, offset):
+    """offset થી limit જેટલી નોંધ આપે. યાદમાં હોય તે જોડે, ખૂટતી જ ડેટાબેઝમાંથી વાંચીને યાદમાં મૂકે."""
+    started = time.time()
+    want_end = offset + limit
+    pos, docs, has_more, ended = offset, [], True, False
+    while pos < want_end:
+        with _hist_more_lock:
+            ch = (_hist_more.get(email) or {}).get(pos)
+        if ch is None or started - ch[0] >= HISTORY_MORE_MEM_SECONDS:
+            break
+        take = ch[1][:want_end - pos]
+        docs += take
+        pos += len(take)
+        has_more = bool(ch[2]) or len(ch[1]) > len(take)
+        if not has_more:
+            ended = True
+            break
+        if not take:
+            break
+    if pos >= want_end or ended:
+        return {"docs": docs, "hasMore": has_more, "limit": limit}
+    page = user_history_page(email, want_end - pos, pos)
+    with _hist_more_lock:
+        if _hist_more_dropped.get(email, 0) < started:  # લોડ ચાલતો હતો ત્યારે ફેરફાર થયો હોય તો જૂનું ન સાચવવું
+            if len(_hist_more) > 2000:
+                for k in list(_hist_more)[:500]:
+                    _hist_more.pop(k, None)
+            per = _hist_more.setdefault(email, {})
+            if len(per) > 200:
+                per.clear()
+            per[pos] = (started, page["docs"], page["hasMore"])
+    return {"docs": docs + page["docs"], "hasMore": page["hasMore"], "limit": limit}
+
+
+def hist_more_forget(email):
+    """ઇતિહાસમાં નવી નોંધ આવે કે સ્થિતિ બદલાય ત્યારે આ યુઝરનાં "વધુ જુઓ" ના બધાં યાદ રાખેલાં પાનાં ભૂંસો."""
+    now = time.time()
+    with _hist_more_lock:
+        _hist_more.pop(email, None)
+        _hist_more_dropped[email] = now
+
+
 def forget_user_cache(email, *kinds):
     """વપરાશકર્તા પોતે કંઈ કરે (ઉપાડ, ટાસ્ક મોકલવો, ઇનામ મળવું) ત્યારે યાદ રાખેલું તરત ભૂંસો."""
     now = time.time()
@@ -585,6 +781,7 @@ def forget_user_cache(email, *kinds):
             if kind == "history":  # પાનાં પ્રમાણે યાદ રાખેલી પહેલી યાદી પણ ભૂંસો
                 _user_cache.pop(("history_p1", email), None)
                 _user_cache_dropped[("history_p1", email)] = now
+                hist_more_forget(email)  # [નવું] "વધુ જુઓ" ના પાનાં પણ ભૂંસો
 
 
 def cache_replace_task(email, doc):
@@ -627,6 +824,7 @@ def cache_set_history_status(email, entry_id, status):
             _user_cache[("history_p1", email)] = (p1[0], page)
         _user_cache_dropped[("history", email)] = now
         _user_cache_dropped[("history_p1", email)] = now
+    hist_more_forget(email)  # [નવું] "વધુ જુઓ" ના પાનાં પણ ભૂંસો
 
 
 def cache_add_history(email, doc):
@@ -651,6 +849,7 @@ def cache_add_history(email, doc):
                 _user_cache[("history_p1", email)] = (p1[0], {"docs": new_docs, "hasMore": has_more, "limit": page.get("limit")})
         _user_cache_dropped[("history", email)] = now
         _user_cache_dropped[("history_p1", email)] = now
+    hist_more_forget(email)  # [નવું] "વધુ જુઓ" ના પાનાં પણ ભૂંસો
 
 
 _last_stats_sync = {}
@@ -875,6 +1074,7 @@ def rg_add_friend(code, level, rec):
         return
     r = dict(rec)
     r["level"] = level
+    rl_added(code, level)   # [નવું] માંગેલાં પાનાંની યાદ સુધારો
     with _rg_lock:
         e = _rg.get(code)
         if e is not None:
@@ -887,6 +1087,7 @@ def rg_mark_paid(code, friend_id):
     """મિત્રનું બોનસ અપાઈ ગયું: યાદીમાં "બોનસ મળ્યું" કરો."""
     if not code:
         return
+    rl_mark_paid(code, friend_id)   # [નવું] માંગેલાં પાનાંમાં પણ
     with _rg_lock:
         e = _rg.get(code)
         if e is not None:
@@ -901,6 +1102,7 @@ def rg_drop(code):
     """એડમિન રિફ્રેશ વખતે (કન્સોલમાં સીધા ફેરફાર પછી) આ યાદી ભૂંસો, આગળ તાજી વંચાશે."""
     if not code:
         return
+    rl_drop(code)   # [નવું] માંગેલાં પાનાંની યાદ પણ ભૂંસો
     with _rg_lock:
         _rg.pop(code, None)
     _slow_downline_cache.pop(code, None)
@@ -921,6 +1123,144 @@ def rg_view(entry, level, limit, offset):
     page = sel[offset:offset + limit]
     has_more = offset + len(page) < len(sel)
     return page, has_more, counts, paid
+
+
+# ----------------------------------------------------------------------------
+# [નવું] રેફર યાદી "માંગો ત્યારે જ વાંચો"
+#   રેફર ટેબ ખોલો ત્યારે મિશ્ર યાદીનું પહેલું પાનું જ વંચાય (આખી યાદી નહીં).
+#   "વધુ જુઓ" દબાવો ત્યારે તેટલાં જ વધુ વંચાય. લેવલ ૧ / ૨ / ૩ માટે પણ એમ જ.
+#   વંચાયેલું પાનું ૩ કલાક ૩ મિનિટ યાદ રહે. કંઈ ન ચાલે તો આપોઆપ જૂની રીત વપરાય.
+# ----------------------------------------------------------------------------
+_rl = {}            # રેફર કોડ -> {"t": સમય, "pages": {(લેવલ, સંખ્યા, શરૂઆત): (સમય, નોંધો, હજી_છે)}, "cnt": {લેવલ: (સમય, સંખ્યા)}}
+_rl_dropped = {}    # રેફર કોડ -> છેલ્લે ક્યારે ફેરફાર/ભૂંસ્યું
+_rl_lock = threading.Lock()
+_rl_or_ok = True    # મિશ્ર યાદીનો OR સવાલ ન ચાલે તો False થાય, પછી જૂની રીત વપરાય
+
+
+def _rl_entry(code):
+    e = _rl.get(code)
+    if e is None:
+        if len(_rl) >= REFER_MEM_MAX_USERS:
+            oldest = min(_rl, key=lambda k: _rl[k]["t"])
+            _rl.pop(oldest, None)
+        e = _rl[code] = {"t": time.time(), "pages": {}, "cnt": {}}
+    return e
+
+
+def _rl_read_page(code, level, limit, offset):
+    """ડેટાબેઝમાંથી ફક્ત માંગેલું પાનું વાંચે: (નોંધો, હજી_છે, કુલ સંખ્યા)."""
+    global _rl_or_ok
+    if level in (1, 2, 3):
+        flt = _downline_filter(code, level)
+    else:
+        flt = [json.dumps({"method": "or", "values": [
+            json.loads(x) for lv in (1, 2, 3) for x in _downline_filter(code, lv)]})]
+    qs = flt + [q("orderDesc", "$createdAt"), q("limit", values=[limit]), q("offset", values=[offset])]
+    try:
+        res = _call("GET", f"/collections/{C_USERS}/documents", params={"queries[]": qs})
+    except AppwriteError as e:
+        if level == 0 and e.status == 400:
+            _rl_or_ok = False
+        raise
+    docs = res.get("documents", [])
+    total = res.get("total")
+    recs = []
+    for d in docs:
+        lv = level
+        if not lv:
+            lv = 1 if d.get("referred_by") == code else (2 if d.get("referred_by_level2") == code else 3)
+        recs.append(_friend_rec(lv, d))
+    if isinstance(total, int):
+        has_more = offset + len(docs) < total
+    else:
+        has_more = len(docs) >= limit
+    return recs, has_more, total
+
+
+def _rl_counts(code):
+    """ત્રણેય લેવલના મિત્રોની સંખ્યા. યાદમાં હોય તે લે, ખૂટતા લેવલ માટે જ નાનો સવાલ (૧ વાંચન) કરે."""
+    started = time.time()
+    out = {}
+    for lv in (1, 2, 3):
+        with _rl_lock:
+            e = _rl.get(code)
+            hit = e["cnt"].get(lv) if e else None
+        if hit and started - hit[0] < REFER_PAGE_MEM_SECONDS:
+            out[str(lv)] = hit[1]
+            continue
+        res = _call("GET", f"/collections/{C_USERS}/documents",
+                    params={"queries[]": _downline_filter(code, lv) + [q("limit", values=[1])]})
+        n = res.get("total")
+        if not isinstance(n, int):
+            n = len(res.get("documents", []))
+        out[str(lv)] = n
+        with _rl_lock:
+            if _rl_dropped.get(code, 0) < started:
+                _rl_entry(code)["cnt"][lv] = (started, n)
+    return out
+
+
+def rl_view(code, level, limit, offset, want_counts):
+    """(પાનું, હજી_છે, સંખ્યા) આપે. None આવે તો જૂની રીત (આખી યાદી) વાપરવી."""
+    if not _fast_downline_ok or (level == 0 and not _rl_or_ok):
+        return None
+    started = time.time()
+    key = (level, limit, offset)
+    with _rl_lock:
+        e = _rl.get(code)
+        hit = e["pages"].get(key) if e else None
+    try:
+        if hit and started - hit[0] < REFER_PAGE_MEM_SECONDS:
+            recs, has_more = hit[1], hit[2]
+        else:
+            recs, has_more, total = _rl_read_page(code, level, limit, offset)
+            with _rl_lock:
+                if _rl_dropped.get(code, 0) < started:
+                    e = _rl_entry(code)
+                    if len(e["pages"]) > 80:
+                        e["pages"].clear()
+                    e["pages"][key] = (started, recs, has_more)
+                    if level in (1, 2, 3) and isinstance(total, int):
+                        e["cnt"][level] = (started, total)
+        counts = _rl_counts(code) if want_counts else {}
+    except AppwriteError as ex:
+        if ex.status == 400:
+            return None
+        raise
+    return recs, has_more, counts
+
+
+def rl_added(code, level):
+    """નવો મિત્ર જોડાય: પાનાં (શરૂઆત બદલાય) ભૂંસો, સંખ્યા યાદમાં જ વધારો."""
+    now = time.time()
+    with _rl_lock:
+        _rl_dropped[code] = now
+        e = _rl.get(code)
+        if e is not None:
+            e["pages"].clear()
+            hit = e["cnt"].get(level)
+            if hit:
+                e["cnt"][level] = (hit[0], hit[1] + 1)
+
+
+def rl_mark_paid(code, friend_id):
+    """મિત્રનું બોનસ અપાયું: યાદ રાખેલાં પાનામાં \"બોનસ મળ્યું\" કરો (ફરી વાંચ્યા વગર)."""
+    now = time.time()
+    with _rl_lock:
+        _rl_dropped[code] = now
+        e = _rl.get(code)
+        if e is not None:
+            for pg in e["pages"].values():
+                for r in pg[1]:
+                    if r.get("id") == friend_id:
+                        r["paid"] = True
+
+
+def rl_drop(code):
+    now = time.time()
+    with _rl_lock:
+        _rl.pop(code, None)
+        _rl_dropped[code] = now
 
 
 # ----------------------------------------------------------------------------
@@ -1083,6 +1423,23 @@ def login():
     })
 
 
+@app.post("/api/session")
+@auth_required
+def session_cookie():
+    """અસલી ટોકન ચકાસીને HttpOnly કૂકી આપે. "Bearer cookie" મોકલો તો કૂકી ચાલે છે કે નહીં તે ચકાસે."""
+    resp = jsonify({"ok": True})
+    header = request.headers.get("Authorization", "")
+    raw = header[7:] if header.startswith("Bearer ") else ""
+    if raw and raw != "cookie":
+        _set_auth_cookie(resp, raw)
+    return resp
+
+
+@app.post("/api/logout")
+def logout_cookie():
+    return _clear_auth_cookie(jsonify({"ok": True}))
+
+
 # ----------------------------------------------------------------------------
 # વપરાશકર્તાની માહિતી
 # ----------------------------------------------------------------------------
@@ -1206,6 +1563,58 @@ def admin_refresh():
 def admin_authorized():
     given = request.headers.get("X-Admin-Secret", "")
     return bool(ADMIN_SECRET) and hmac.compare_digest(given.encode("utf-8"), ADMIN_SECRET.encode("utf-8"))
+
+
+@app.after_request
+def _live_request_log(resp):
+    """દરેક વિનંતીની લાઇન ટર્મિનલ જેવી જ બનાવીને લૉગમાં ઉમેરે (OPTIONS પણ, 200 પણ, 400/403 પણ)."""
+    try:
+        if request.path == "/api/admin/logs":
+            return resp
+        ip = (request.headers.get("X-Forwarded-For", "").split(",")[0].strip()) or request.remote_addr or "-"
+        full, short = _live_stamp()
+        path = request.path + (("?" + request.query_string.decode("utf-8", "ignore")) if request.query_string else "")
+        proto = request.environ.get("SERVER_PROTOCOL", "HTTP/1.1")
+        code = resp.status_code
+        if code == 304:
+            color = "cyan"
+        elif code == 404:
+            color = "yellow"
+        elif code >= 400:
+            color = "red"
+        elif code >= 300:
+            color = "green"
+        else:
+            color = ""
+        _live_add([
+            [f'{full} INFO {ip} - - [{short}] "', ""],
+            [f"{request.method} {path} {proto}", color],
+            [f'" {code} -', ""],
+        ])
+    except Exception:  # noqa
+        pass
+    return resp
+
+
+@app.get("/api/admin/logs")
+def admin_logs():
+    if not admin_authorized():
+        time.sleep(1)  # ખોટો ગુપ્ત શબ્દ વારંવાર અજમાવવાનું ધીમું પડે
+        return err("Not allowed", 403)
+    try:
+        after = int(request.args.get("after", "0"))
+    except ValueError:
+        after = 0
+    try:
+        limit = max(1, min(int(request.args.get("limit", "500")), 1000))
+    except ValueError:
+        limit = 500
+    with _LIVE_LOCK:
+        last = _LIVE_ID
+        items = [x for x in _LIVE_LOGS if x["id"] > after]
+    if after <= 0:
+        items = items[-300:]  # પહેલી વાર ખોલો ત્યારે છેલ્લા 300
+    return jsonify({"ok": True, "last": last, "logs": items[-limit:]})
 
 
 # ----------------------------------------------------------------------------
@@ -1406,7 +1815,7 @@ def set_upi():
 # ----------------------------------------------------------------------------
 # ઓફર, ટાસ્ક, ઇતિહાસ
 # ----------------------------------------------------------------------------
-OFFER_FIELDS = ["$id", "taskName", "offer_subtitle", "offer_subtitles", "offer_prize", "offer_logo",
+OFFER_FIELDS = ["$id", "$createdAt", "taskName", "offer_subtitle", "offer_subtitles", "offer_prize", "offer_logo",
                 "offer_filter_time", "offer_filter_count_step", "offer_link", "offer_step",
                 "offer_stepincode", "offer_example_photo", "offer_notice"]
 TASK_FIELDS = ["$id", "$createdAt", "offer_taskname", "task_status", "task_approval_reason", "warning_count",
@@ -1425,6 +1834,24 @@ def tasks():
     docs = cached_user_list("tasks", g.user["user_gmail_account"], user_tasks)
     try_pay_own_referral(g.user, docs)
     return jsonify({"documents": [pick(d, TASK_FIELDS) for d in docs]})
+
+
+def history_page_from_memory(email, cached_page, limit):
+    """યાદમાં રાખેલા પહેલા પાનાની સંખ્યા અને માંગેલી સંખ્યા અલગ હોય તો પણ શક્ય હોય ત્યાં સુધી યાદમાંથી જ આપો.
+    યાદમાં પૂરતી નોંધ જ ન હોય ત્યારે જ એક વાર વાંચીને મોટું પાનું યાદમાં મૂકો, એટલે ફરી વાંચવું ન પડે."""
+    docs = list(cached_page.get("docs", []))
+    cached_limit = cached_page.get("limit") or len(docs)
+    has_more = bool(cached_page.get("hasMore"))
+    if cached_limit >= limit or not has_more:
+        return {"docs": docs[:limit], "hasMore": has_more or len(docs) > limit, "limit": limit}
+    started = time.time()
+    rest = cached_history_more(email, limit - len(docs), len(docs))  # [બદલ્યું] પહેલાંની નોંધ યાદમાંથી, ખૂટતી જ વાંચો
+    page = {"docs": docs + rest["docs"], "hasMore": rest["hasMore"], "limit": limit}
+    key = ("history_p1", email)
+    with _user_cache_lock:
+        if _user_cache_dropped.get(key, 0) < started:  # વાંચતી વખતે ભૂંસાયું હોય તો જૂનું ન સાચવવું
+            _user_cache[key] = (started, page)
+    return page
 
 
 @app.get("/api/history")
@@ -1446,9 +1873,9 @@ def history():
             if offset == 0:
                 page = cached_user_list("history_p1", email, lambda e: user_history_page(e, limit, 0))
                 if page.get("limit") != limit:
-                    page = user_history_page(email, limit, 0)
+                    page = history_page_from_memory(email, page, limit)
             else:
-                page = user_history_page(email, limit, offset)
+                page = cached_history_more(email, limit, offset)  # [બદલ્યું] યાદમાંથી, ૩ કલાક ૩ મિનિટ
             return jsonify({"documents": [pick(d, HISTORY_FIELDS) for d in page["docs"]],
                             "hasMore": page["hasMore"]})
         except AppwriteError as e:
@@ -1626,6 +2053,140 @@ def withdraw_quote():
     return jsonify({"ok": problem is None, "error": problem or "", "amount": amt, "fee": fee, "net": net})
 
 
+def _gross_from_net(net):
+    """[નવું] ઇતિહાસમાં ફી કાપ્યા પછીની રકમ (net) લખાય છે; બેલેન્સમાંથી કપાયેલી પૂરી રકમ (gross) પાછી શોધે છે."""
+    if FEE_PERCENT <= 0 or FEE_PERCENT >= 100:
+        return net
+    base = net / (Decimal(1) - Decimal(FEE_PERCENT) / Decimal(100))
+    for k in range(-3, 4):
+        gross = (base + Decimal(k) / Decimal(100)).quantize(Decimal("0.01"))
+        if Decimal(str(calc_fee(gross)[1])) == net:
+            return gross
+    return net
+
+
+# ----------------------------------------------------------------------------
+# [નવું] ઉપાડનો પ્રવાહ: પહેલાં pending → 1 મિનિટમાં સર્વર હિસાબ તપાસે → બરાબર હોય તો "process", વધારે હોય તો "reject"
+# (reject માં ફક્ત હિસાબવાળી રકમ બેલેન્સમાં પાછી) + દરેક ઉપાડ પછી 30 મિનિટનો વિરામ.
+# `earn_check` ખાનામાં છેલ્લા ઉપાડનો સમય "wd_at:<મિલીસેકન્ડ>" તરીકે સચવાય છે.
+# ----------------------------------------------------------------------------
+WITHDRAW_CHECK_DELAY = int(os.environ.get("WITHDRAW_CHECK_DELAY") or 60)             # સેકન્ડ
+WITHDRAW_COOLDOWN = int(os.environ.get("WITHDRAW_COOLDOWN_MIN") or 30) * 60           # સેકન્ડ
+
+
+def _last_withdraw_ms(user):
+    for v in (user.get("earn_check") or []):
+        sv = str(v)
+        if sv.startswith("wd_at:"):
+            try:
+                return int(sv[6:])
+            except ValueError:
+                return 0
+    return 0
+
+
+def withdraw_cooldown_error(user):
+    """છેલ્લા ઉપાડને 30 મિનિટ ન થઈ હોય તો ભૂલનો જવાબ, નહીંતર None. (યુઝરની રો પહેલેથી વંચાયેલી છે, વધારાનું વાંચન નથી)"""
+    last = _last_withdraw_ms(user)
+    if not last:
+        return None
+    left = WITHDRAW_COOLDOWN - (time.time() * 1000 - last) / 1000.0
+    if left <= 0:
+        return None
+    return err(f"Next withdraw is possible after {int(left // 60) + 1} min", 429)
+
+
+def check_withdraw_request(req_id):
+    """એક pending ઉપાડનો હિસાબ તપાસો. બરાબર → "process". વધારે → "reject" + ફક્ત હિસાબવાળી રકમ પાછી."""
+    w0 = get_doc(C_WITHDRAW, req_id)
+    if norm(w0.get("payout_status1") or "pending") != "pending":
+        return
+    email = str(w0.get("user_gmail_account1") or "").strip()
+    u = find_one(C_USERS, "user_gmail_account", email) if email else None
+    if not u:
+        log.warning("ઉપાડ તપાસ: યુઝર મળ્યો નહીં %s", req_id)
+        return
+    uid = u["$id"]
+    with user_lock(uid):
+        w = get_doc(C_WITHDRAW, req_id)  # તાળા અંદર ફરી જુઓ: બીજા કોઈએ હમણાં જ તપાસી લીધો હોય તો બેવડું ન થાય
+        if norm(w.get("payout_status1") or "pending") != "pending":
+            return
+        entry_id = "w_" + req_id
+        # [બદલ્યું] હવે કોઈ હિસાબ-તપાસ નથી: 1 મિનિટ પછી સીધું "process"
+        new_status, refund = "process", Decimal("0")
+
+        # પહેલાં સ્થિતિ બદલો (દાવો કરો), પછી પૈસા પાછા: ભૂલ થાય તો બેવડા પૈસા બનવાને બદલે લોગમાં ચેતવણી
+        update_doc(C_WITHDRAW, req_id, {"payout_status1": new_status})
+        hist_doc = None
+        try:
+            hist_doc = update_doc(C_HISTORY, entry_id, {"status": new_status})
+        except AppwriteError as e:
+            if e.status != 404:
+                log.warning("ઇતિહાસની સ્થિતિ બદલી ન શકાઈ %s: %s", entry_id, e)
+        cache_set_history_status(email, entry_id, new_status)
+
+        user = get_doc(C_USERS, uid)
+        if new_status == "reject":
+            if refund > 0:
+                try:
+                    new_bal = round(float(user.get("total_balance_available") or 0) + float(refund), 2)
+                    user = update_doc(C_USERS, uid, {"total_balance_available": new_bal})
+                except Exception as e:  # noqa
+                    log.error("રિફંડ આપી શકાયું નહીં uid=%s રકમ=%s: %s", uid, refund, e)
+            save_user_stats(user, {
+                "user_total_pendingwithdraw": max(0, int(user.get("user_total_pendingwithdraw") or 0) - 1),
+                "user_total_rejectedwithdraw": int(user.get("user_total_rejectedwithdraw") or 0) + 1,
+            })
+
+        payload = {"withdrawUpdated": True, **user_push_basics(user)}
+        if hist_doc is not None:
+            payload["entries"] = [pick(hist_doc, HISTORY_FIELDS)]
+        if new_status == "reject":
+            payload["notice"] = f"Illegal activity detected. Withdraw rejected. ₹{refund} returned to your balance."
+        push_user(uid, payload)
+
+
+def schedule_withdraw_check(req_id, delay=None, attempt=0):
+    """થોડી વાર પછી પાછળથી તપાસ ચલાવો. ભૂલ થાય તો 3 વાર ફરી પ્રયાસ."""
+    def run():
+        try:
+            check_withdraw_request(req_id)
+        except Exception as e:  # noqa
+            log.error("ઉપાડ તપાસમાં ભૂલ %s (પ્રયાસ %s): %s", req_id, attempt + 1, e)
+            if attempt < 3:
+                schedule_withdraw_check(req_id, 30 * (attempt + 1), attempt + 1)
+    t = threading.Timer(WITHDRAW_CHECK_DELAY if delay is None else delay, run)
+    t.daemon = True
+    t.start()
+
+
+def withdraw_password_error(user, given):
+    """[નવું] ઉપાડ પહેલાં પાસવર્ડ ચકાસો. બરાબર હોય તો None, નહીંતર ભૂલનો જવાબ (401 નહીં, જેથી એપ લોગઆઉટ ન થાય)."""
+    key = f"wd|{user['$id']}"
+    if too_many_failures(key):
+        return err("Too many wrong passwords. Try again after 10 minutes", 429)
+    if not verify_password(user, str(given or "")):
+        _failed[key].append(time.time())
+        return err("Wrong Password", 403)
+    _failed.pop(key, None)
+    return None
+
+
+@app.post("/api/verify-password")
+@auth_required
+def verify_password_only():
+    """[નવું] ઉપાડ સ્ક્રીન પાસવર્ડ સાચો છે કે નહીં તે પહેલાં જ પૂછી લે છે (કંઈ બદલાતું નથી)."""
+    d = request.get_json(silent=True) or {}
+    user = g.user  # [નવું] લૉગિન ચકાસણીમાં યુઝરની રો પહેલેથી આવી ગઈ છે, ફરી વાંચવી નથી
+    bad = withdraw_password_error(user, d.get("password"))
+    if bad:
+        return bad
+    bad = withdraw_cooldown_error(user)  # [નવું] 30 મિનિટનો વિરામ પહેલાં જ બતાવો
+    if bad:
+        return bad
+    return jsonify({"ok": True})
+
+
 @app.post("/api/withdraw")
 @auth_required
 def withdraw():
@@ -1640,6 +2201,16 @@ def withdraw():
         email = user["user_gmail_account"]
         balance = float(user.get("total_balance_available") or 0)
         upi = str(user.get("user_addupi_id") or "").strip()
+
+        # [નવું] પાસવર્ડ સાચો હોય તો જ આગળ વધાય (બેલેન્સ ઘટે કે pending બને તે પહેલાં)
+        bad = withdraw_password_error(user, d.get("password"))
+        if bad:
+            return bad
+
+        # [નવું] દરેક ઉપાડ પછી 30 મિનિટનો વિરામ (હિસાબની તપાસ pending બન્યા પછી 1 મિનિટમાં સર્વર જાતે કરે છે)
+        bad = withdraw_cooldown_error(user)
+        if bad:
+            return bad
 
         if not upi or upi == "Not set":
             return err("Please add your UPI ID first")
@@ -1703,6 +2274,13 @@ def withdraw():
             log.error("ઇતિહાસની નોંધ ન થઈ: %s", e)
             forget_user_cache(email, "history")
 
+        # [નવું] ઉપાડ સ્વીકારાયો: વિરામ માટે સમય `earn_check` માં સાચવો, અને 1 મિનિટ પછી સર્વર જાતે હિસાબ તપાસશે
+        try:
+            update_doc(C_USERS, uid, {"earn_check": ["wd_at:%d" % int(time.time() * 1000)]})
+        except Exception as e:  # noqa
+            log.warning("earn_check લખી શકાયું નહીં uid=%s: %s", uid, e)
+        schedule_withdraw_check(req_doc["$id"])
+
     # ઉપાડની ગણતરી ઉપર થઈ ગઈ છે (counts), એ જ યુઝર રોમાં લખો. ટાસ્ક અને ઇતિહાસ ફરી વાંચવા નહીં
     save_user_stats(user, {
         "user_total_withdraw": counts[0],
@@ -1731,8 +2309,13 @@ def referrals():
     offset = max(0, safe_int(request.args.get("offset")))
     want_counts = request.args.get("counts") == "1"
 
-    entry = rg_get(code)   # યાદમાં હોય તો ડેટાબેઝ સાથે કોઈ વાત નહીં
-    page, has_more, counts, paid = rg_view(entry, level, limit, offset)
+    lazy = rl_view(code, level, limit, offset, want_counts)   # [નવું] ફક્ત માંગેલું પાનું વાંચો
+    if lazy is not None:
+        page, has_more, counts = lazy
+        paid = safe_int(user.get("user_refer_number"))   # રોમાં સાચવેલી સંખ્યા, ફરી ગણવી નહીં
+    else:
+        entry = rg_get(code)   # યાદમાં હોય તો ડેટાબેઝ સાથે કોઈ વાત નહીં
+        page, has_more, counts, paid = rg_view(entry, level, limit, offset)
 
     # "Success Refer" સંખ્યા યાદીમાંથી જ ગણાઈ. રોમાં અલગ હોય તો જ એક વાર લખો (વાંચન નહીં)
     if safe_int(user.get("user_refer_number")) != paid:
@@ -1965,6 +2548,14 @@ def add_headers(resp):
         resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Admin-Secret"
         resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         resp.headers["Access-Control-Allow-Private-Network"] = "true"
+    # [નવું] માન્ય વેબસાઇટ માટે ચોક્કસ સરનામું + કૂકીની છૂટ + ડેટા લેવા / બદલવા / ભૂંસવાની છૂટ
+    _origin = request.headers.get("Origin", "")
+    if _origin and origin_allowed(_origin):
+        resp.headers["Access-Control-Allow-Origin"] = _origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type, X-Admin-Secret"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        resp.headers.add("Vary", "Origin")
     return resp
 
 
@@ -2056,7 +2647,7 @@ def serve(path):
 # બોટ સર્વર સાથે જ ચાલે છે (ખાસ રસ્તો/વેબહૂક જોઈતો નથી). ટોકન ખાલી હોય તો બોટ ચાલુ થતો નથી.
 # ----------------------------------------------------------------------------
 # BotFather પાસેથી મળેલો ટોકન (અથવા હોસ્ટિંગમાં TELEGRAM_BOT_TOKEN નામથી મૂકો)
-TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "8826411886:AAFFN5qy_ZMiWToDuhNoHEN72SB73Wvud5U").strip()
+TELEGRAM_BOT_TOKEN = (os.environ.get("TELEGRAM_BOT_TOKEN") or "8754549327:AAF4iJaxkPG5pmL3m4XOkrLlIhC5BQZzOMU").strip()   # લોકલ ટેસ્ટમાં બોટ બંધ (લાઇવ બોટ સાથે અથડામણ ન થાય)
 # જોડાવી જરૂરી ચેનલો (@ સાથે). બોટને બંનેમાં એડમિન બનાવવો જરૂરી છે, નહીંતર સભ્ય ચકાસી શકાતો નથી
 TELEGRAM_CHANNEL = (os.environ.get("TELEGRAM_CHANNEL") or "@cashhfarmer").strip()
 TELEGRAM_CHANNELS = [TELEGRAM_CHANNEL, "@CashFarmersProof03"]
@@ -2797,7 +3388,7 @@ def tg_handle_update(upd):
         parts = text.split(maxsplit=1)
         payload = parts[1].strip() if len(parts) > 1 else ""
         if not payload:
-            tg_send(chat_id, "Hello! 👋\nPlease open the Cash Farmers app, go to the Telegram task and tap CONNECT TELEGRAM first.")
+            tg_send(chat_id, "🌾 Welcome to Cash Farmer Support! 💚✨\n\n💬 Tell us how we can help, or send a screenshot of your issue. 📸")
             return
         user, code = tg_link_account(tg_id, payload)
         if code == "ok":
@@ -2853,7 +3444,5 @@ if not os.environ.get("NO_BACKGROUND"):
 
 
 if __name__ == "__main__":
-    log.info("HTML ફોલ્ડર: %s", PUBLIC_DIR)
-    if not os.path.isfile(os.path.join(PUBLIC_DIR, "index.html")):
-        log.warning("આ ફોલ્ડરમાં index.html મળી નથી! PUBLIC_FOLDER માં સાચું સરનામું લખો.")
+    threading.Timer(1.5, _show_total).start()  # Press CTRL+C લાઇનની નીચે શરૂઆતનો કુલ બતાવે
     app.run(host=os.environ.get("HOST", "0.0.0.0"), port=int(os.environ.get("PORT", 5000)), threaded=True)
