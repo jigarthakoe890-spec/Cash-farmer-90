@@ -26,7 +26,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from functools import wraps
 
 import requests
-from flask import Flask, Response, g, jsonify, request, send_from_directory
+from flask import Flask, Response, g, has_request_context, jsonify, request, send_from_directory
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from werkzeug.exceptions import NotFound
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -54,7 +54,7 @@ def _live_stamp():
 
 
 def _live_add(parts):
-    """parts = [[લખાણ, રંગ], ...]  રંગ: "" (સફેદ), red, green, yellow, cyan"""
+    """parts = [[લખાણ, રંગ], ...]  રંગ: "" (સફેદ), red, green, yellow, cyan, pink, brown"""
     global _LIVE_ID
     with _LIVE_LOCK:
         _LIVE_ID += 1
@@ -105,6 +105,10 @@ APPWRITE_API_KEY = "standard_8e05de023d2eeebe5292137816c5f400e6a1749ff3b4594b9e4
 # ImgBB ની નવી કી (જૂની કી રદ કરો)
 IMGBB_API_KEY = "8c5b5ce8657dbaa910dc1d2f2a1feef2"
 
+# [નવું] OneSignal: કોઈ યુઝર ટાસ્ક સબમિટ કરે ત્યારે તમારા ફોનમાં સૂચના મોકલવા માટે
+ONESIGNAL_APP_ID = "d922c3fa-58fe-4aa0-9aed-aeb0756746d2"
+ONESIGNAL_API_KEY = "os_v2_app_3ermh6sy7zfkbgxnv2yhkz2g2itozsynu3pelbvcmgxiyh3eagw4rhm3efeggsgfnqhzcvf7dddkxc3rnorwpmezvsle4curmjes23y"
+
 # લોગિન ટોકન સાચા છે કે નકલી તે ચકાસવા માટેનું ગુપ્ત લખાણ (મેં બનાવી આપ્યું છે, બદલવું જરૂરી નથી)
 SECRET_KEY = "1cee97246f1da3872c21ce3601ae4706aa484f93bb5ad6ec8d21ba0e616d4dc9"
 
@@ -144,6 +148,7 @@ C_TASKS = "user_task_approval"
 C_WITHDRAW = "withdraw_request"
 C_HISTORY = "user_reward_history"
 C_OFFERS = "offer_list"
+C_REFER = "6af3058d001c4b89daf4"   # [નવું] refer_tb ટેબલ (એપરાઈટમાં નામ refer_tb, પણ સાચો ID આ છે): દરેક (મિત્ર, લેવલ) ની એક રો
 
 # ઉપાડની મર્યાદા અને ફી (બધા નિયમ ફક્ત અહીં જ, HTML કંઈ ગણતું નથી)
 MIN_WITHDRAW = 5
@@ -231,14 +236,140 @@ def _show_total(total=None):
     print(f"\033[92mકુલ Appwrite read વપરાયા: {total}\033[0m", flush=True)
 
 
+# ----------------------------------------------------------------------------
+# [નવું] ટર્મિનલ લૉગ: કયા gmail ના કેટલા read (ગુલાબી) અને કયો index વપરાયો (કથ્થઈ)
+# રંગ બદલવા હોય તો ફક્ત આ બે લાઇનના આંકડા (256 રંગનો કોડ) બદલો
+# ----------------------------------------------------------------------------
+_C_PINK = "\033[38;5;213m"
+_C_BROWN = "\033[38;5;130m"
+_C_OFF = "\033[0m"
+
+_read_by_email = {}   # gmail -> આ સર્વર ચાલુ થયા પછી તેના કુલ read
+
+
+def _read_owner():
+    """હાલની વિનંતી કયા gmail ની છે: લૉગિન પછી ટોકનનું ઇમેઇલ, લૉગિન/સાઇનઅપમાં મોકલેલું ઇમેઇલ."""
+    try:
+        if has_request_context():
+            u = getattr(g, "user", None)
+            if u and u.get("user_gmail_account"):
+                return u["user_gmail_account"]
+            e = getattr(g, "read_email", None)
+            if e:
+                return e
+            j = request.get_json(silent=True)
+            if isinstance(j, dict):
+                e = str(j.get("email") or "").strip().lower()
+                if e:
+                    return e
+            return "અજાણ્યો યુઝર"
+    except Exception:  # noqa
+        pass
+    return "સર્વર (પાછળનું કામ)"
+
+
+def _read_stage():
+    """કયો સ્ટેજ (કઈ API) આ read કરાવે છે."""
+    try:
+        if has_request_context():
+            return f"{request.method} {request.path}"
+    except Exception:  # noqa
+        pass
+    return "પાછળનું કામ"
+
+
 def _count_read(data):
-    """એપરાઈટમાંથી જેટલા ડોક્યુમેન્ટ વંચાય તેટલા કુલ સંખ્યામાં ઉમેરે અને ટર્મિનલમાં બતાવે."""
+    """એપરાઈટમાંથી જેટલા ડોક્યુમેન્ટ વંચાય તેટલા કુલ સંખ્યામાં ઉમેરે અને ટર્મિનલમાં બતાવે.
+    પહેલાં ગુલાબી લાઇન (આ gmail ના કુલ read + સ્ટેજ), પછી લીલી લાઇન (બધાના કુલ)."""
     global _read_total
     n = len(data.get("documents", [])) if isinstance(data, dict) and "documents" in data else 1
+    owner, stage = _read_owner(), _read_stage()
     with _read_lock:
         _read_total += n
         total = _read_total
+        if len(_read_by_email) > 5000:
+            _read_by_email.clear()
+        _read_by_email[owner] = _read_by_email.get(owner, 0) + n
+        mine = _read_by_email[owner]
+    line = f"{owner} ના {mine} read (+{n}) • સ્ટેજ: {stage}"
+    _live_add([[line, "pink"]])
+    print(f"{_C_PINK}{line}{_C_OFF}", flush=True)
     _show_total(total)
+
+
+# કયા કૉલમ પર કયો index છે તે એપરાઈટ પાસેથી એક વાર પૂછીને યાદ રાખે (ડોક્યુમેન્ટ વંચાતા નથી, read ગણાતા નથી)
+_idx_cache = {}
+_idx_lock = threading.Lock()
+_INDEX_FALLBACK = {   # એપરાઈટ index ની યાદી ન આપે (API કીમાં indexes.read પરવાનગી ન હોય) ત્યારે
+    C_REFER: {"referrer_email": ["idx_referrer"], "friend_email": ["idx_friend"],
+              "bonus_paid": ["idx_paid"], "paid_timestamp": ["idx_paid_time"]},
+}
+
+
+def _index_map(col):
+    """{કૉલમ: [index નામ, ...]} અથવા None (નામ ન મળ્યાં)."""
+    with _idx_lock:
+        if col in _idx_cache:
+            return _idx_cache[col]
+    result = None
+    try:
+        r = _http.request("GET", f"{ENDPOINT}/databases/{DATABASE_ID}/collections/{col}/indexes",
+                          headers=_AW_HEADERS, timeout=15)
+        if r.status_code == 200:
+            result = {}
+            for ix in r.json().get("indexes", []):
+                for a in (ix.get("attributes") or ix.get("columns") or []):
+                    result.setdefault(a, []).append(ix.get("key"))
+    except Exception:  # noqa
+        result = None
+    if result is None:
+        result = _INDEX_FALLBACK.get(col)
+    with _idx_lock:
+        _idx_cache[col] = result
+    return result
+
+
+def _query_attrs(raws, out):
+    """queries માંથી કૉલમના નામ કાઢે ($createdAt જેવા સિસ્ટમ કૉલમ છોડીને)."""
+    for raw in raws or []:
+        try:
+            d = json.loads(raw) if isinstance(raw, str) else raw
+        except Exception:  # noqa
+            continue
+        if not isinstance(d, dict):
+            continue
+        if d.get("method") in ("or", "and"):
+            _query_attrs(d.get("values"), out)
+            continue
+        a = d.get("attribute")
+        if a and not str(a).startswith("$") and a not in out:
+            out.append(a)
+
+
+def _note_index_use(path, kwargs):
+    """કૉલમ પર index વપરાય તો કથ્થઈ લાઇન: indexuse: <index નામ> (<કૉલમ>)."""
+    try:
+        m = re.match(r"^/collections/([^/]+)/documents$", path)
+        if not m:
+            return
+        attrs = []
+        _query_attrs((kwargs.get("params") or {}).get("queries[]"), attrs)
+        if not attrs:
+            return
+        imap = _index_map(m.group(1))
+        shown = []
+        for a in attrs:
+            names = (imap or {}).get(a)
+            if names:
+                shown.append(f"{names[0]} ({a})")
+            elif imap is None:
+                shown.append(a)   # index ના નામની યાદી મળી નથી, કૉલમનું નામ બતાવો
+        if shown:
+            line = "indexuse: " + ", ".join(shown)
+            _live_add([[line, "brown"]])
+            print(f"{_C_BROWN}{line}{_C_OFF}", flush=True)
+    except Exception:  # noqa
+        pass
 
 
 def _call(method, path, **kwargs):
@@ -251,6 +382,7 @@ def _call(method, path, **kwargs):
         raise AppwriteError(f"{r.status_code}: {r.text[:300]}", r.status_code)
     data = r.json() if r.text else {}
     if method == "GET":
+        _note_index_use(path, kwargs)
         _count_read(data)
     return data
 
@@ -355,13 +487,13 @@ def user_is_connected(uid):
 
 
 def user_push_basics(u):
-    """બેલેન્સ અને રેફરના આંકડા (/api/me જેવા જ)."""
-    return {
-        "balance": round(float(u.get("total_balance_available") or 0), 2),
-        "referNumber": u.get("user_refer_number") or 0,
-        "referEarning": u.get("user_refer_earning") or 0,
-    }
-
+    """બેલેન્સ અને રેફરના આંકડા (/api/me જેવા જ).
+    [બદલ્યું] રેફરના આંકડા refer_tb ના હિસાબની યાદમાંથી; યાદમાં ન હોય તો અહીં ડેટાબેઝ વંચાતો નથી."""
+    out = {"balance": round(float(u.get("total_balance_available") or 0), 2)}
+    st = rs_peek(u.get("user_gmail_account"))
+    if st:
+        out["referNumber"], out["referEarning"] = st
+    return out
 
 # ----------------------------------------------------------------------------
 # નાના સાધનો
@@ -563,6 +695,7 @@ def auth_required(fn):
             if from_cookie:
                 return _err_clear_cookie("Session expired. Please login again", 401)
             return err("Session expired. Please login again", 401)
+        g.read_email = data.get("email")   # [નવું] ટર્મિનલ લૉગમાં આ gmail ના read ગણવા
         try:
             user = get_user_for_auth(data["id"])
         except AppwriteError as e:
@@ -907,33 +1040,6 @@ def generate_refer_code():
     return random.choice(caps) + random.choice(caps) + random.choice(smalls) + random.choice(nums) + random.choice(smalls)
 
 
-# [નવું] રેફર કોડ -> (યુઝર id, તેને રેફર કરનારનો કોડ). આ કદી બદલાતું નથી, એટલે કાયમ યાદ રાખી શકાય.
-# ઇનામ આપતી વખતે ઉપરના લેવલ શોધવા દર વખતે ડેટાબેઝ વાંચવો પડતો નથી.
-_code_info = {}
-_code_info_lock = threading.Lock()
-
-
-def code_info_put(code, uid, referred_by):
-    if not code or not uid:
-        return
-    with _code_info_lock:
-        if len(_code_info) > 20000:
-            _code_info.clear()
-        _code_info[code] = (uid, referred_by or "")
-
-
-def code_info(code):
-    with _code_info_lock:
-        hit = _code_info.get(code)
-    if hit:
-        return hit
-    doc = find_one(C_USERS, "user_refer_code", code)
-    if not doc:
-        return None
-    code_info_put(code, doc["$id"], doc.get("referred_by"))
-    return (doc["$id"], doc.get("referred_by") or "")
-
-
 def ensure_refer_code(user):
     if user.get("user_refer_code"):
         return user["user_refer_code"]
@@ -942,9 +1048,139 @@ def ensure_refer_code(user):
         if not find_one(C_USERS, "user_refer_code", code):
             break
     update_doc(C_USERS, user["$id"], {"user_refer_code": code, "user_refer_link": f"{INVITE_BASE}{code}"})
-    code_info_put(code, user["$id"], user.get("referred_by"))
     return code
 
+
+# ----------------------------------------------------------------------------
+# [નવું] રેફર ટેબલ (refer_tb): દરેક (મિત્ર, લેવલ) ની એક રો
+#   referrer_email = ઇનામ મેળવનાર, friend_email = જોડાયેલો મિત્ર, level = ૧/૨/૩, amount = ઇનામ,
+#   bonus_paid = ઇનામ અપાયું કે નહીં, paid_date / paid_timestamp = ઇનામ અપાયાનો સમય (રેફર ઇતિહાસ).
+#   user_information માં હવે રેફરની ફક્ત user_refer_code અને user_refer_link રહે છે.
+# ----------------------------------------------------------------------------
+def refer_row_id(friend_id, level):
+    return f"rb_{friend_id}_{level}"
+
+
+def friend_id_of_row(d):
+    """રોના $id (rb_<મિત્ર id>_<લેવલ>) માંથી મિત્રનો user id."""
+    rid = str(d.get("$id") or "")
+    if rid.startswith("rb_") and "_" in rid[3:]:
+        return rid[3:].rsplit("_", 1)[0]
+    return rid
+
+
+# ઇમેઇલ -> user id (કાયમ યાદ રાખી શકાય, કદી બદલાતું નથી)
+_email_uid = {}
+_email_uid_lock = threading.Lock()
+
+
+def email_uid_put(email, uid):
+    if not email or not uid:
+        return
+    with _email_uid_lock:
+        if len(_email_uid) > 20000:
+            _email_uid.clear()
+        _email_uid[email] = uid
+
+
+def uid_of_email(email):
+    with _email_uid_lock:
+        hit = _email_uid.get(email)
+    if hit:
+        return hit
+    doc = find_one(C_USERS, "user_gmail_account", email)
+    if not doc:
+        return None
+    email_uid_put(email, doc["$id"])
+    return doc["$id"]
+
+
+# મિત્રના ઇમેઇલ -> (સમય, હજી ન અપાયેલી refer_tb રો). જેને કોઈએ રેફર નથી કર્યો તેની યાદી ખાલી.
+_friend_rows = {}
+_friend_rows_lock = threading.Lock()
+
+
+def friend_unpaid_rows(email):
+    started = time.time()
+    with _friend_rows_lock:
+        hit = _friend_rows.get(email)
+    if hit and started - hit[0] < REFER_MEM_SECONDS:
+        return hit[1]
+    rows = [d for d in list_docs(C_REFER, [q("equal", "friend_email", [email])]) if d.get("bonus_paid") is not True]
+    with _friend_rows_lock:
+        if len(_friend_rows) > 20000:
+            _friend_rows.clear()
+        _friend_rows[email] = (started, rows)
+    return rows
+
+
+# રેફર કરનારના ઇમેઇલ -> (સમય, સફળ રેફર સંખ્યા, કુલ કમાણી). refer_tb ની bonus_paid = true રો પરથી.
+_rs = {}
+_rs_touched = {}
+_rs_lock = threading.Lock()
+
+
+def rs_peek(email):
+    """ફક્ત યાદમાંથી (ડેટાબેઝ નહીં). ન હોય તો None."""
+    if not email:
+        return None
+    with _rs_lock:
+        hit = _rs.get(email)
+    if hit and time.time() - hit[0] < REFER_MEM_SECONDS:
+        return hit[1], hit[2]
+    return None
+
+
+def refer_stats(email):
+    """(સફળ રેફર સંખ્યા, કુલ કમાણી). યાદમાં ન હોય તો જ refer_tb માંથી વંચાય."""
+    got = rs_peek(email)
+    if got is not None:
+        return got
+    started = time.time()
+    rows = list_docs(C_REFER, [q("equal", "referrer_email", [email]), q("equal", "bonus_paid", [True])])
+    n = len(rows)
+    earn = 0.0
+    for d in rows:
+        earn += float(d.get("amount") or 0)
+    earn = int_if_whole(round(earn, 2))
+    with _rs_lock:
+        if _rs_touched.get(email, 0) < started:    # વાંચતી વખતે ઇનામ અપાયું હોય તો આ જૂનો આંકડો ન સાચવવો
+            if len(_rs) > 5000:
+                _rs.clear()
+            _rs[email] = (started, n, earn)
+    return n, earn
+
+
+def rs_add(email, amount):
+    """એક ઇનામ અપાયું: યાદમાં સંખ્યા અને કમાણી સીધી વધારો (ફરી વાંચવું નહીં)."""
+    now = time.time()
+    with _rs_lock:
+        if len(_rs_touched) > 20000:
+            _rs_touched.clear()
+        _rs_touched[email] = now
+        hit = _rs.get(email)
+        if hit:
+            _rs[email] = (hit[0], hit[1] + 1, int_if_whole(round(float(hit[2]) + float(amount), 2)))
+
+
+def refer_cache_drop(email):
+    """એડમિન રિફ્રેશ (કન્સોલમાં સીધા ફેરફાર પછી): આ યુઝરની રેફરની બધી યાદ ભૂંસો, આગળ તાજી વંચાશે."""
+    if not email:
+        return
+    with _friend_rows_lock:
+        _friend_rows.pop(email, None)
+    with _rs_lock:
+        _rs.pop(email, None)
+        _rs_touched[email] = time.time()
+    rg_drop(email)
+
+
+def refer_row_mark_paid(row_id, time_str, stamp):
+    """refer_tb ની રોમાં ઇનામ અપાયાની નોંધ (ઇતિહાસ). ભૂલ થાય તો મુખ્ય કામ અટકતું નથી."""
+    try:
+        update_doc(C_REFER, row_id, {"bonus_paid": True, "paid_date": time_str, "paid_timestamp": stamp})
+    except AppwriteError as e:
+        log.error("refer_tb ની રો અપડેટ ન થઈ %s: %s", row_id, e)
 
 # ----------------------------------------------------------------------------
 # [નવું] રેફર યાદી સર્વરની યાદમાં
@@ -952,77 +1188,39 @@ def ensure_refer_code(user):
 #   ડેટાબેઝમાંથી ફક્ત પહેલી વાર (અથવા સર્વર ફરી ચાલુ થયા પછી / ૧૨ કલાક પછી) વંચાય છે.
 #   પછી:  નવો સભ્ય જોડાય -> યાદીમાં સીધો ઉમેરાય.   બોનસ મળે -> "બોનસ મળ્યું" સીધું બદલાય.
 # ----------------------------------------------------------------------------
-_rg = {}                                  # રેફર કોડ -> {"time": સમય, "friends": {મિત્ર id: નોંધ}}
+_rg = {}                                  # રેફર કરનારનું ઇમેઇલ -> {"time": સમય, "friends": {મિત્ર id: નોંધ}}
 _rg_lock = threading.Lock()
 _rg_loading = {}                          # લોડ ચાલુ હોય ત્યારે વચ્ચે આવેલા ફેરફારો અહીં જમા થાય
 _rg_load_locks = defaultdict(threading.Lock)
 _fast_downline_ok = True
-_slow_downline_cache = {}                 # રેફર કોડ -> (સમય, (l1, l2, l3))  [ફક્ત જૂની ધીમી રીત માટે]
 
 
 def _downline_filter(code, level):
-    if level == 1:
-        return [q("equal", "referred_by", [code])]
-    if level == 2:
-        return [q("equal", "referred_by_level2", [code])]
-    return [q("equal", "referred_by_level3", [code])]
-
-
-def downline_all_slow(code):
-    """જૂની રીત (બધા મિત્રો વાંચે). ફક્ત ત્યારે વપરાય જો ઝડપી રીત (index) ન ચાલે."""
-    hit = _slow_downline_cache.get(code)
-    if hit and time.time() - hit[0] < REFER_MEM_SECONDS:
-        return hit[1]
-
-    def by_codes(codes):
-        docs = []
-        for i in range(0, len(codes), 100):
-            docs += list_docs(C_USERS, [q("equal", "referred_by", codes[i:i + 100])])
-        return docs
-
-    def codes_of(docs):
-        return [d["user_refer_code"] for d in docs if d.get("user_refer_code")]
-
-    a = by_codes([code])
-    b = by_codes(codes_of(a)) if a else []
-    c = by_codes(codes_of(b)) if b else []
-    if len(_slow_downline_cache) > 500:
-        _slow_downline_cache.clear()
-    _slow_downline_cache[code] = (time.time(), (a, b, c))
-    return a, b, c
+    """[બદલ્યું] code = રેફર કરનારનું ઇમેઇલ. level ૦ = ત્રણેય લેવલ (refer_tb ની રો)."""
+    f = [q("equal", "referrer_email", [code])]
+    if level in (1, 2, 3):
+        f.append(q("equal", "level", [level]))
+    return f
 
 
 def _friend_rec(level, d):
     return {
-        "id": d.get("$id"),
-        "name": d.get("user_nickname") or "Friend",
-        "paid": d.get("refer_bonus_paid") is True,
+        "id": friend_id_of_row(d),
+        "name": d.get("friend_name") or "Friend",
+        "paid": d.get("bonus_paid") is True,
         "level": level,
         "createdAt": d.get("$createdAt") or "",
     }
 
 
 def _load_downline(code):
-    """ડેટાબેઝમાંથી એક રેફર કરનારના ત્રણેય લેવલના મિત્રો વાંચે (ફક્ત પહેલી વાર)."""
-    global _fast_downline_ok
+    """refer_tb માંથી એક રેફર કરનારના ત્રણેય લેવલના મિત્રો વાંચે (ફક્ત પહેલી વાર)."""
     friends = {}
-    if _fast_downline_ok:
-        try:
-            for lv in (1, 2, 3):
-                for d in list_docs(C_USERS, _downline_filter(code, lv)):
-                    friends[d["$id"]] = _friend_rec(lv, d)
-            return friends
-        except AppwriteError as e:
-            if e.status != 400:
-                raise
-            _fast_downline_ok = False
-            friends = {}
-            log.warning("ઝડપી રેફર શોધ ચાલી નહીં, જૂની રીત વાપરું છું. એપરાઈટમાં user_information ટેબલ પર "
-                        "referred_by_level2 અને referred_by_level3 ના index બનાવો: %s", e)
-    l1, l2, l3 = downline_all_slow(code)
-    for lv, docs in ((1, l1), (2, l2), (3, l3)):
-        for d in docs:
-            friends[d["$id"]] = _friend_rec(lv, d)
+    for d in list_docs(C_REFER, [q("equal", "referrer_email", [code])]):
+        lv = safe_int(d.get("level"))
+        if lv in (1, 2, 3):
+            rec = _friend_rec(lv, d)
+            friends[rec["id"]] = rec
     return friends
 
 
@@ -1105,7 +1303,6 @@ def rg_drop(code):
     rl_drop(code)   # [નવું] માંગેલાં પાનાંની યાદ પણ ભૂંસો
     with _rg_lock:
         _rg.pop(code, None)
-    _slow_downline_cache.pop(code, None)
 
 
 def rg_view(entry, level, limit, offset):
@@ -1150,14 +1347,10 @@ def _rl_entry(code):
 def _rl_read_page(code, level, limit, offset):
     """ડેટાબેઝમાંથી ફક્ત માંગેલું પાનું વાંચે: (નોંધો, હજી_છે, કુલ સંખ્યા)."""
     global _rl_or_ok
-    if level in (1, 2, 3):
-        flt = _downline_filter(code, level)
-    else:
-        flt = [json.dumps({"method": "or", "values": [
-            json.loads(x) for lv in (1, 2, 3) for x in _downline_filter(code, lv)]})]
+    flt = _downline_filter(code, level)
     qs = flt + [q("orderDesc", "$createdAt"), q("limit", values=[limit]), q("offset", values=[offset])]
     try:
-        res = _call("GET", f"/collections/{C_USERS}/documents", params={"queries[]": qs})
+        res = _call("GET", f"/collections/{C_REFER}/documents", params={"queries[]": qs})
     except AppwriteError as e:
         if level == 0 and e.status == 400:
             _rl_or_ok = False
@@ -1168,7 +1361,7 @@ def _rl_read_page(code, level, limit, offset):
     for d in docs:
         lv = level
         if not lv:
-            lv = 1 if d.get("referred_by") == code else (2 if d.get("referred_by_level2") == code else 3)
+            lv = safe_int(d.get("level"))
         recs.append(_friend_rec(lv, d))
     if isinstance(total, int):
         has_more = offset + len(docs) < total
@@ -1188,7 +1381,7 @@ def _rl_counts(code):
         if hit and started - hit[0] < REFER_PAGE_MEM_SECONDS:
             out[str(lv)] = hit[1]
             continue
-        res = _call("GET", f"/collections/{C_USERS}/documents",
+        res = _call("GET", f"/collections/{C_REFER}/documents",
                     params={"queries[]": _downline_filter(code, lv) + [q("limit", values=[1])]})
         n = res.get("total")
         if not isinstance(n, int):
@@ -1202,6 +1395,7 @@ def _rl_counts(code):
 
 def rl_view(code, level, limit, offset, want_counts):
     """(પાનું, હજી_છે, સંખ્યા) આપે. None આવે તો જૂની રીત (આખી યાદી) વાપરવી."""
+    global _fast_downline_ok
     if not _fast_downline_ok or (level == 0 and not _rl_or_ok):
         return None
     started = time.time()
@@ -1225,6 +1419,9 @@ def rl_view(code, level, limit, offset, want_counts):
         counts = _rl_counts(code) if want_counts else {}
     except AppwriteError as ex:
         if ex.status == 400:
+            _fast_downline_ok = False
+            log.warning("ઝડપી રેફર શોધ ચાલી નહીં, યાદવાળી રીત વાપરું છું. એપરાઈટમાં refer_tb પર "
+                        "level નો index (Key) બનાવો: %s", ex)
             return None
         raise
     return recs, has_more, counts
@@ -1338,10 +1535,17 @@ def signup():
                 return err("Invalid refer code")
             if referrer.get("user_gmail_account") == email:
                 return err("You cannot use your own refer code")
-            code_info_put(referrer.get("user_refer_code"), referrer["$id"], referrer.get("referred_by"))
+            email_uid_put(referrer.get("user_gmail_account"), referrer["$id"])
 
-        level2 = (referrer.get("referred_by") or "") if referrer else ""
-        level3 = (referrer.get("referred_by_level2") or "") if referrer else ""
+        # [બદલ્યું] ઉપરના લેવલ refer_tb માંથી: લેવલ ૧ = રેફર કરનાર, લેવલ ૨ = તેને રેફર કરનાર, લેવલ ૩ = તેની ઉપરનો
+        level_emails = {}
+        if referrer:
+            ref_email = referrer["user_gmail_account"]
+            level_emails[1] = ref_email
+            for d in list_docs(C_REFER, [q("equal", "friend_email", [ref_email])]):
+                lv = safe_int(d.get("level"))
+                if lv in (1, 2) and d.get("referrer_email"):
+                    level_emails[lv + 1] = d["referrer_email"]
 
         # રેફર કોડ ખાતું બનાવતી વખતે જ બને છે, એટલે એપ ખુલે ત્યારે અલગથી બનાવવા-લખવાનું નહીં
         while True:
@@ -1353,14 +1557,36 @@ def signup():
             "user_nickname": nickname,
             "user_gmail_account": email,
             "user_password": password,
-            "referred_by": refer_code,
-            "referred_by_level2": level2,
-            "referred_by_level3": level3,
-            "refer_bonus_paid": False,
             "user_refer_code": new_code,
             "user_refer_link": f"{INVITE_BASE}{new_code}",
         })
-        code_info_put(new_code, new_doc.get("$id"), refer_code)
+        email_uid_put(email, new_doc.get("$id"))
+
+        # [નવું] રેફરની નોંધ refer_tb માં: દરેક લેવલની એક રો (bonus_paid = false). ન બને તો ખાતું પાછું કાઢો
+        refer_rows = []
+        try:
+            for lv in sorted(level_emails):
+                refer_rows.append(create_doc(C_REFER, {
+                    "referrer_email": level_emails[lv],
+                    "friend_email": email,
+                    "friend_name": nickname,
+                    "level": lv,
+                    "amount": float(REFER_REWARDS.get(lv, 0)),
+                    "bonus_paid": False,
+                }, doc_id=refer_row_id(new_doc["$id"], lv)))
+        except Exception:
+            for r in refer_rows:
+                try:
+                    _call("DELETE", f"/collections/{C_REFER}/documents/{r['$id']}")
+                except Exception:  # noqa
+                    pass
+            try:
+                _call("DELETE", f"/collections/{C_USERS}/documents/{new_doc['$id']}")
+            except Exception:  # noqa
+                pass
+            raise
+        with _friend_rows_lock:     # આ નવા મિત્રની ન અપાયેલી રો યાદમાં (જેને કોઈએ રેફર નથી કર્યો તેની ખાલી)
+            _friend_rows[email] = (time.time(), refer_rows)
 
     # [નવું] ઉપરના ૩ લેવલની મિત્ર-યાદીમાં નવો સભ્ય સીધો ઉમેરો (ડેટાબેઝ ફરી વાંચવો નહીં)
     friend_rec = {
@@ -1369,31 +1595,8 @@ def signup():
         "paid": False,
         "createdAt": new_doc.get("$createdAt") or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    if referrer:
-        rg_add_friend(referrer.get("user_refer_code") or refer_code, 1, friend_rec)
-    if level2:
-        rg_add_friend(level2, 2, friend_rec)
-    if level3:
-        rg_add_friend(level3, 3, friend_rec)
-
-    # ઉપરના ૩ લેવલને નવા સભ્યની જાણ
-    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    targets = []
-    if referrer:
-        targets.append(referrer["$id"])
-    for code in (level2, level3):
-        if code:
-            try:
-                info = code_info(code)   # [નવું] યાદમાંથી, ન હોય તો જ ડેટાબેઝ
-                if info:
-                    targets.append(info[0])
-            except AppwriteError:
-                pass
-    for doc_id in targets:
-        try:
-            update_doc(C_USERS, doc_id, {"refer_new_join_time": now_iso})
-        except AppwriteError:
-            pass
+    for lv, up_email in level_emails.items():
+        rg_add_friend(up_email, lv, friend_rec)
 
     return jsonify({"ok": True})
 
@@ -1443,18 +1646,54 @@ def logout_cookie():
 # ----------------------------------------------------------------------------
 # વપરાશકર્તાની માહિતી
 # ----------------------------------------------------------------------------
+# [નવું] યુઝર એપ કેટલી વાર ખોલે છે તેની ગણતરી (દિવસ મુજબ). 90 સેકન્ડથી વધુ શાંતિ પછી પહેલી વિનંતી = નવી વાર ખોલી.
+# બીજી વાર, ત્રીજી વાર, ચોથી વાર... લૉગમાં કેસરી રંગમાં જીમેઇલ અને નિકનેમ સાથે ગુજરાતીમાં લખાય છે.
+_C_ORANGE = "\033[38;5;208m"
+_app_open_stats = {}
+_app_open_lock = threading.Lock()
+_APP_OPEN_GAP = 90
+_GUJ_ORD = {2: "બીજી", 3: "ત્રીજી", 4: "ચોથી", 5: "પાંચમી", 6: "છઠ્ઠી", 7: "સાતમી", 8: "આઠમી", 9: "નવમી", 10: "દસમી"}
+
+
+def _note_app_open(email, nickname):
+    try:
+        if not email:
+            return
+        now = time.time()
+        day = datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+        with _app_open_lock:
+            rec = _app_open_stats.get(email)
+            if rec is None or rec[0] != day:
+                _app_open_stats[email] = [day, 1, now]   # આજની પહેલી વાર
+                return
+            gap = now - rec[2]
+            rec[2] = now
+            if gap <= _APP_OPEN_GAP:
+                return                                    # એ જ ચાલુ સત્ર
+            rec[1] += 1
+            n = rec[1]
+        word = _GUJ_ORD.get(n, "%d મી" % n)
+        print("%s%s (%s) એ આજે %s વાર એપ ખોલી%s" % (_C_ORANGE, email, nickname or "-", word, _C_OFF), flush=True)
+        # [નવું] વેબસાઇટના લાઇવ લૉગ પાનામાં પણ કેસરી (orange) રંગમાં દેખાય
+        _live_add([["%s (%s) એ આજે %s વાર એપ ખોલી" % (email, nickname or "-", word), "orange"]])
+    except Exception:  # noqa
+        pass
+
+
 @app.get("/api/me")
 @auth_required
 def me():
     u = g.user
+    _note_app_open(u.get("user_gmail_account"), u.get("user_nickname"))
     code = ensure_refer_code(u)
+    refer_number, refer_earning = refer_stats(u.get("user_gmail_account"))   # [બદલ્યું] refer_tb પરથી
     return jsonify({
         "id": u["$id"],
         "email": u.get("user_gmail_account"),
         "nickname": u.get("user_nickname") or "",
         "balance": float(u.get("total_balance_available") or 0),
-        "referNumber": u.get("user_refer_number") or 0,
-        "referEarning": u.get("user_refer_earning") or 0,
+        "referNumber": refer_number,
+        "referEarning": refer_earning,
         "upi": u.get("user_addupi_id") or "",
         "referCode": code,
         "referLink": f"{INVITE_BASE}{code}",
@@ -1529,7 +1768,7 @@ def admin_refresh():
     uid = user["$id"]
     drop_user_caches(uid)           # યુઝરની રો ભૂંસો
     forget_user_cache(email)        # ટાસ્ક અને ઇતિહાસની યાદી ભૂંસો
-    rg_drop(user.get("user_refer_code"))   # [નવું] આ યુઝરની રેફર મિત્ર-યાદી ભૂંસો, આગળ તાજી વંચાશે
+    refer_cache_drop(email)   # [નવું] આ યુઝરની રેફરની બધી યાદ (મિત્ર-યાદી, આંકડા, ન અપાયેલી રો) ભૂંસો, આગળ તાજી વંચાશે
     with _done_lock:
         _done_offers.pop(uid, None)        # [નવું] મંજૂર ટાસ્કના નામની યાદ ભૂંસો
     udoc, tdocs = None, None
@@ -1741,6 +1980,23 @@ def admin_task_approved():
 # માંગ: {"requestId": "<withdraw_request નો $id>", "status": "success" અથવા "reject", "email": "...",
 #        "writeDb": false}
 # ----------------------------------------------------------------------------
+# [નવું] ઇતિહાસની નોંધ સર્વરની યાદમાં હોય તો તેની નકલ આપે (ડેટાબેઝ વાંચ્યા વગર). ન હોય તો None.
+def _cached_history_entry(email, entry_id):
+    try:
+        with _user_cache_lock:
+            _full = _user_cache.get(("history", email))
+            _p1 = _user_cache.get(("history_p1", email))
+        _cands = list(_full[1]) if (_full and isinstance(_full[1], list)) else []
+        if _p1 and isinstance(_p1[1], dict):
+            _cands += list(_p1[1].get("docs") or [])
+        for _dd in _cands:
+            if _dd.get("entry_id") == entry_id or _dd.get("$id") == entry_id:
+                return dict(_dd)
+    except Exception:  # noqa
+        pass
+    return None
+
+
 @app.post("/api/admin/withdraw-status")
 def admin_withdraw_status():
     if not admin_authorized():
@@ -1757,10 +2013,69 @@ def admin_withdraw_status():
     email = str(d.get("email") or "").strip()
     hist = None
 
+    # [નવું] તરત બતાવવું: સર્વર ડેટાબેઝમાં લખવા જાય તે જ ક્ષણે યાદમાં સ્થિતિ બદલાય અને ખુલ્લી એપને તરત success દેખાય.
+    # ડેટાબેઝમાં લખવાનું સાથે સાથે ચાલે છે. લખવામાં ભૂલ આવે તો યાદ અને એપ જૂની સ્થિતિ પર પાછા જાય.
+    # (ઇમેઇલ ન મળે કે નોંધ યાદમાં ન હોય તો નીચેની જૂની રીત જ ચાલે છે.)
+    _db_done = False
+    if d.get("writeDb") is not False and email:
+        _old = _cached_history_entry(email, entry_id)
+        if _old is not None:
+            _box = {}
+
+            def _db_job():
+                try:
+                    _box["w"] = update_doc(C_WITHDRAW, req_id, {"payout_status1": st})
+                except BaseException as _e:  # noqa
+                    _box["w_err"] = _e
+                    return
+                try:
+                    _box["hist"] = update_doc(C_HISTORY, entry_id, {"status": st})
+                except AppwriteError as _e:
+                    if _e.status != 404:
+                        log.warning("ઇતિહાસની સ્થિતિ બદલી ન શકાઈ %s: %s", entry_id, _e)
+                except BaseException as _e:  # noqa
+                    _box["h_err"] = _e
+
+            _th = threading.Thread(target=_db_job, daemon=True)
+            _th.start()                                        # ડેટાબેઝમાં લખવાનું શરૂ
+            cache_set_history_status(email, entry_id, st)      # એ જ ક્ષણે સર્વરની યાદમાં
+            _fast = dict(_old)
+            _fast["status"] = st
+            try:
+                _fuid = str(d.get("userId") or "").strip() or uid_of_email(email) or ""
+            except Exception:  # noqa
+                _fuid = ""
+            if _fuid:                                          # અને એપ ખુલ્લી હોય તો તરત success
+                push_user(_fuid, {"withdrawUpdated": True, "entries": [pick(_fast, HISTORY_FIELDS)]})
+            _th.join()
+
+            def _undo():
+                cache_set_history_status(email, entry_id, _old.get("status"))
+                if _fuid:
+                    push_user(_fuid, {"withdrawUpdated": True, "entries": [pick(_old, HISTORY_FIELDS)]})
+
+            if "w_err" in _box:
+                _undo()
+                _e = _box["w_err"]
+                if isinstance(_e, AppwriteError) and _e.status == 404:
+                    return err("Withdraw request not found", 404)
+                raise _e
+            if "h_err" in _box:
+                raise _box["h_err"]
+            _w_email = str(_box["w"].get("user_gmail_account1") or "").strip()
+            if _w_email and norm(_w_email) != norm(email):
+                # માંગમાં આપેલો ઇમેઇલ આ ઉપાડનો નથી: ખોટા યુઝરની યાદ પાછી કરો, પછી સાચા યુઝર માટે જૂની રીતથી
+                _undo()
+                email = _w_email
+                hist = _box.get("hist")
+                _db_done = True
+            else:
+                return jsonify({"ok": True, "status": st})
+
     if d.get("writeDb") is False:
         if not email:
             return err("email is required when writeDb is false")
-    else:
+    elif not _db_done:
         try:
             w = update_doc(C_WITHDRAW, req_id, {"payout_status1": st})
         except AppwriteError as e:
@@ -1775,6 +2090,22 @@ def admin_withdraw_status():
                 log.warning("ઇતિહાસની સ્થિતિ બદલી ન શકાઈ %s: %s", entry_id, e)
 
     if email:
+        # [નવું] ડેટાબેઝ વાંચ્યા વગર: યાદમાં રહેલી ઉપાડની નોંધ લઈ તેની સ્થિતિ બદલી એપને તરત મોકલો
+        if hist is None:
+            try:
+                with _user_cache_lock:
+                    _full = _user_cache.get(("history", email))
+                    _p1 = _user_cache.get(("history_p1", email))
+                _cands = list(_full[1]) if (_full and isinstance(_full[1], list)) else []
+                if _p1 and isinstance(_p1[1], dict):
+                    _cands += list(_p1[1].get("docs") or [])
+                for _dd in _cands:
+                    if _dd.get("entry_id") == entry_id or _dd.get("$id") == entry_id:
+                        hist = dict(_dd)
+                        hist["status"] = st
+                        break
+            except Exception as e:  # noqa
+                log.warning("ઉપાડની નોંધ યાદમાંથી ન મળી %s: %s", entry_id, e)
         cache_set_history_status(email, entry_id, st)
         uid = str(d.get("userId") or "").strip()
         if not uid:
@@ -1786,6 +2117,22 @@ def admin_withdraw_status():
                 payload["entries"] = [pick(hist, HISTORY_FIELDS)]
             push_user(uid, payload)
     return jsonify({"ok": True, "status": st})
+
+
+# [નવું] એડમિન પેનલ નવી pending વિનંતી (ઉપાડ) આવે ત્યારે આ રસ્તો બોલાવે (X-Admin-Secret સાથે) અને સર્વર OneSignal સૂચના મોકલે.
+# માંગ: {"title": "New Withdraw Request", "message": "નામ • ₹રકમ"}
+@app.post("/api/admin/notify")
+def admin_notify():
+    if not admin_authorized():
+        return err("Forbidden", 403)
+    d = request.get_json(silent=True) or {}
+    title = str(d.get("title") or "").strip()[:100]
+    message = str(d.get("message") or "").strip()[:300]
+    if not title or not message:
+        return err("title and message are required")
+    log.info("[OneSignal] એડમિન પેનલે સૂચના માંગી: %s | %s", title, message)
+    notify_task_submitted(title, message, "payments")   # પાછળના થ્રેડમાં મોકલાય છે (મથાળું = title, નીચે = message)
+    return jsonify({"ok": True})
 
 
 @app.get("/api/config")
@@ -1932,6 +2279,105 @@ def upload_photo_route():
     return jsonify({"url": url})
 
 
+# ----------------------------------------------------------------------------
+# [નવું] ટાસ્ક સબમિટ થાય ત્યારે OneSignal સૂચના: મથાળું = યુઝરનું નામ, નીચે નાના અક્ષરમાં તેની જીમેઇલ
+# પાછળના ભાગમાં (અલગ થ્રેડમાં) મોકલાય છે, એટલે ટાસ્ક સબમિટ ધીમું ન પડે અને સૂચના નિષ્ફળ થાય તો પણ ટાસ્ક અટકે નહીં.
+# ----------------------------------------------------------------------------
+# [નવું] OneSignal માં External ID (ઇમેઇલ) વાળા યુઝરની સાચી સ્થિતિ જોઈને ફક્ત એક જ સ્પષ્ટ કારણ આપે છે
+def _onesignal_exact_cause(app_id, key, target_email=None):
+    try:
+        if not target_email:
+            return "સૂચના મોકલવા માટે ઇમેઇલ (External ID) આપ્યો નથી."
+        rr = requests.get(
+            "https://api.onesignal.com/apps/%s/users/by/external_id/%s" % (app_id, requests.utils.quote(str(target_email), safe="")),
+            headers={"Authorization": "Key " + key},
+            timeout=15,
+        )
+        if rr.status_code == 404:
+            return "OneSignal માં '%s' External ID વાળો કોઈ યુઝર નથી. એપમાં આ ઇમેઇલથી લૉગિન થયું નથી (નવી APK ઇન્સ્ટોલ કરી ફરી લૉગિન કરો)." % target_email
+        if rr.status_code >= 300:
+            return "યુઝરની સ્થિતિ તપાસી ન શકાઈ, OneSignal નો જવાબ: %s %s" % (rr.status_code, rr.text[:150])
+        subs = [x for x in ((rr.json() or {}).get("subscriptions") or []) if "push" in str(x.get("type", "")).lower() or "android" in str(x.get("type", "")).lower()]
+        if not subs:
+            return "'%s' યુઝર મળ્યો, પણ તેની સાથે કોઈ push ફોન જોડાયેલો નથી." % target_email
+        if any(x.get("enabled") and (x.get("notification_types") in (None, 1)) for x in subs):
+            return "'%s' નો ફોન Subscribed છે અને મળ્યો છે, છતાં OneSignal એ સૂચના બનાવી નહીં. OneSignal નો જવાબ ઉપર જુઓ." % target_email
+        return "'%s' નો ફોન મળ્યો પણ Subscribed નથી (notification_types=%s, enabled=%s)." % (target_email, subs[0].get("notification_types"), subs[0].get("enabled"))
+    except Exception as e:  # noqa
+        return "યુઝરની સ્થિતિ તપાસી ન શકાઈ: %s %s" % (e.__class__.__name__, str(e)[:150])
+
+
+def _onesignal_send(name, email, open_page="tasks"):
+    try:
+        key = (os.environ.get("ONESIGNAL_API_KEY") or ONESIGNAL_API_KEY).strip()
+        app_id = (os.environ.get("ONESIGNAL_APP_ID") or ONESIGNAL_APP_ID).strip()
+        log.info("[OneSignal] સૂચના મોકલવાનો પ્રયાસ શરૂ: %s (%s)", name, email)  # [નવું]
+        if not key or not app_id:
+            log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = App ID અથવા API Key ખાલી છે. ફાઈલમાં ONESIGNAL_APP_ID અને ONESIGNAL_API_KEY લખો.")  # [નવું]
+            return
+        # [નવું] કોને મોકલવી: Render માં ONESIGNAL_ADMIN_EMAIL મૂકો તો તે એડમિનને, નહીંતર સબમિટ કરનાર યુઝરના પોતાના ફોનને
+        _os_target = (os.environ.get("ONESIGNAL_ADMIN_EMAIL") or "cf_admin").strip()
+        # [નવું] ટાસ્ક માટે: મથાળું "New Task Request" અને નીચે યુઝરનું નામ. બીજી સૂચના (ઉપાડ) માટે જે આવ્યું તે જ.
+        if open_page == "tasks":
+            _os_head, _os_body_txt = "New Task Request", "%s ની ટાસ્ક રિક્વેસ્ટ આવી" % name
+        else:
+            _os_head, _os_body_txt = name, email
+        r = requests.post(
+            "https://api.onesignal.com/notifications?c=push",
+            headers={"Authorization": "Key " + key, "Content-Type": "application/json"},
+            json={
+                "app_id": app_id,
+                "target_channel": "push",
+                "include_aliases": {"external_id": [_os_target]},
+                "headings": {"en": _os_head},
+                "contents": {"en": _os_body_txt},
+                "data": {"open": open_page},  # [નવું] સૂચના પર ક્લિક કરતાં એપ કયું પેજ ખોલે
+            },
+            timeout=15,
+        )
+        # [નવું] OneSignal નો જવાબ અને સૂચના કેમ ન ગઈ તેનું સ્પષ્ટ કારણ લૉગમાં
+        log.info("[OneSignal] જવાબ આવ્યો: સ્ટેટસ %s, લખાણ %s", r.status_code, r.text[:300])
+        try:
+            _os_body = r.json()
+        except Exception:  # noqa
+            _os_body = {}
+        _os_errors = _os_body.get("errors") if isinstance(_os_body, dict) else None
+        if r.status_code in (401, 403):
+            log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = API Key ખોટી છે કે આ App ની નથી (સ્ટેટસ %s). OneSignal ડેશબોર્ડમાં Settings > Keys & IDs માંથી સાચી App API Key લો.", r.status_code)
+        elif r.status_code == 400 and not _os_errors:
+            log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = માંગમાં ભૂલ (સ્ટેટસ 400). App ID ખોટો હોઈ શકે.")
+        elif _os_errors:
+            _os_txt = " ".join(str(x) for x in _os_errors) if isinstance(_os_errors, list) else str(_os_errors)
+            if "not subscribed" in _os_txt.lower() or "no subscribed" in _os_txt.lower():
+                log.warning("[OneSignal] સૂચના નથી ગઈ: સાચું કારણ = %s", _onesignal_exact_cause(app_id, key, _os_target))
+            else:
+                log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = OneSignal એ ભૂલ આપી: %s", _os_txt[:300])
+        elif r.status_code < 300 and not _os_body.get("id"):
+            log.warning("[OneSignal] સૂચના નથી ગઈ: સાચું કારણ = %s", _onesignal_exact_cause(app_id, key, _os_target))
+        elif r.status_code < 300:
+            log.info("[OneSignal] સૂચના સફળતાથી મોકલાઈ ગઈ (id %s).", _os_body.get("id"))
+        if r.status_code >= 300:
+            log.warning("OneSignal સૂચના નિષ્ફળ: %s %s", r.status_code, r.text[:200])
+    except Exception as e:  # noqa
+        log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = OneSignal સુધી પહોંચી શકાયું નહીં (ઇન્ટરનેટ/નેટવર્ક ભૂલ): %s %s", e.__class__.__name__, str(e)[:200])  # [નવું]
+        log.warning("OneSignal સૂચના નિષ્ફળ: %s", e.__class__.__name__)
+
+
+_recent_notifs = {}
+
+
+def notify_task_submitted(name, email, open_page="tasks"):
+    # [નવું] એ જ સૂચના 2 મિનિટમાં ફરી આવે (જેમ કે સર્વર અને પેનલ બંને મોકલે) તો બીજી વાર ન મોકલવી
+    _k = "%s|%s|%s" % (name, email, open_page)
+    _now = time.time()
+    for _old in [x for x, t in _recent_notifs.items() if _now - t > 120]:
+        _recent_notifs.pop(_old, None)
+    if open_page == "payments" and _k in _recent_notifs:
+        return
+    _recent_notifs[_k] = _now
+    threading.Thread(target=_onesignal_send, args=(name, email, open_page), daemon=True).start()
+
+
 @app.post("/api/submit-task")
 @auth_required
 def submit_task():
@@ -2007,6 +2453,7 @@ def submit_task():
         "user_pending_task": stats["user_pending_task"] + 1,
         "user_total_task": stats["user_total_task"] + 1,
     })
+    notify_task_submitted(user.get("user_nickname") or "Unknown User", email)  # [નવું] OneSignal સૂચના
     return jsonify({"ok": True})
 
 
@@ -2160,6 +2607,58 @@ def schedule_withdraw_check(req_id, delay=None, attempt=0):
     t.start()
 
 
+# ----------------------------------------------------------------------------
+# [નવું] ઉપાડની સૂચના હવે તરત નથી જતી. ૧ મિનિટની તપાસ પૂરી થઈ વિનંતી "process" બને તેની ૧ સેકન્ડ પછી OneSignal ને જાય છે,
+# જેથી સૂચના આવે ત્યારે વિનંતી એડમિન યાદીમાં હાજર હોય. સર્વર અને એડમિન પેનલ બંને સૂચના માંગે છે, તેમાંથી ફક્ત એક જ જાય છે.
+# ટાસ્કની સૂચના પહેલાની જેમ તરત જાય છે. ઉપરનું મૂળ કાર્ય બદલ્યું નથી, ફક્ત તેની ઉપર લપેટ્યું છે.
+# ----------------------------------------------------------------------------
+_wd_check_original = check_withdraw_request
+_wd_notify_original = notify_task_submitted
+_wd_cond = threading.Condition()
+_wd_check_done = 0       # કેટલી ઉપાડ-તપાસ સફળતાથી પૂરી થઈ
+_wd_notify_keys = set()  # જે ઉપાડની સૂચના રાહમાં છે તેની ઓળખ (બેવડી સૂચના ટાળવા)
+
+
+def check_withdraw_request(req_id):
+    global _wd_check_done
+    res = _wd_check_original(req_id)  # ભૂલ આવે તો અહીંથી જ બહાર નીકળે, ગણતરી વધતી નથી
+    with _wd_cond:
+        _wd_check_done += 1
+        _wd_cond.notify_all()
+    return res
+
+
+def notify_task_submitted(name, email, open_page="tasks"):
+    if open_page != "payments":
+        return _wd_notify_original(name, email, open_page)
+    _k = "%s|%s" % (name, email)
+    with _wd_cond:
+        if _k in _wd_notify_keys:
+            return
+        _wd_notify_keys.add(_k)
+
+    def _later():
+        try:
+            time.sleep(WITHDRAW_CHECK_DELAY)          # ૧ મિનિટ (તપાસનો સમય)
+            with _wd_cond:
+                _start = _wd_check_done
+                _end = time.time() + 30               # તપાસ ન થાય તો પણ વધુમાં વધુ 30 સેકન્ડ રાહ
+                while _wd_check_done == _start:
+                    _left = _end - time.time()
+                    if _left <= 0:
+                        break
+                    _wd_cond.wait(_left)
+            time.sleep(1)                             # સ્થિતિ "process" થયા પછી 1 સેકન્ડ
+            _wd_notify_original(name, email, open_page)
+        except Exception as e:  # noqa
+            log.warning("[OneSignal] ઉપાડની મોડી સૂચના નિષ્ફળ: %s", e)
+        finally:
+            with _wd_cond:
+                _wd_notify_keys.discard(_k)
+
+    threading.Thread(target=_later, daemon=True, name="withdraw-notify").start()
+
+
 def withdraw_password_error(user, given):
     """[નવું] ઉપાડ પહેલાં પાસવર્ડ ચકાસો. બરાબર હોય તો None, નહીંતર ભૂલનો જવાબ (401 નહીં, જેથી એપ લોગઆઉટ ન થાય)."""
     key = f"wd|{user['$id']}"
@@ -2280,6 +2779,11 @@ def withdraw():
         except Exception as e:  # noqa
             log.warning("earn_check લખી શકાયું નહીં uid=%s: %s", uid, e)
         schedule_withdraw_check(req_doc["$id"])
+        # [નવું] એડમિન એપને "New Withdraw Request" સૂચના (ક્લિક કરતાં ઉપાડ વિનંતી પેજ ખૂલે)
+        try:
+            notify_task_submitted("New Withdraw Request", "%s • ₹%s" % (user.get("user_nickname") or "User", net), "payments")
+        except Exception as e:  # noqa
+            log.warning("[OneSignal] ઉપાડની સૂચના શરૂ ન થઈ: %s", e)
 
     # ઉપાડની ગણતરી ઉપર થઈ ગઈ છે (counts), એ જ યુઝર રોમાં લખો. ટાસ્ક અને ઇતિહાસ ફરી વાંચવા નહીં
     save_user_stats(user, {
@@ -2299,8 +2803,8 @@ def withdraw():
 @auth_required
 def referrals():
     user = g.user
-    code = ensure_refer_code(user)
-    uid = user["$id"]
+    ensure_refer_code(user)
+    code = user["user_gmail_account"]   # [બદલ્યું] refer_tb માં રેફર કરનારની ઓળખ તેનું ઇમેઇલ છે
 
     level = safe_int(request.args.get("level"))
     if level not in (0, 1, 2, 3):
@@ -2312,18 +2816,12 @@ def referrals():
     lazy = rl_view(code, level, limit, offset, want_counts)   # [નવું] ફક્ત માંગેલું પાનું વાંચો
     if lazy is not None:
         page, has_more, counts = lazy
-        paid = safe_int(user.get("user_refer_number"))   # રોમાં સાચવેલી સંખ્યા, ફરી ગણવી નહીં
+        paid = refer_stats(code)[0]   # [બદલ્યું] refer_tb ના હિસાબની યાદમાંથી, ફરી ગણવી નહીં
     else:
         entry = rg_get(code)   # યાદમાં હોય તો ડેટાબેઝ સાથે કોઈ વાત નહીં
         page, has_more, counts, paid = rg_view(entry, level, limit, offset)
 
-    # "Success Refer" સંખ્યા યાદીમાંથી જ ગણાઈ. રોમાં અલગ હોય તો જ એક વાર લખો (વાંચન નહીં)
-    if safe_int(user.get("user_refer_number")) != paid:
-        try:
-            update_doc(C_USERS, uid, {"user_refer_number": paid})
-        except AppwriteError:
-            pass
-    refer_earning = user.get("user_refer_earning") or 0
+    refer_earning = refer_stats(code)[1]   # [બદલ્યું] refer_tb ના હિસાબની યાદમાંથી
 
     items = [{
         "id": v.get("id"),
@@ -2351,17 +2849,17 @@ def referrals():
 # ----------------------------------------------------------------------------
 def upline_chain(friend):
     """મિત્રને રેફર કરનાર (લેવલ ૧), તેને રેફર કરનાર (લેવલ ૨), તેને રેફર કરનાર (લેવલ ૩).
-    [નવું] કોડ -> યુઝરની યાદમાંથી, ડેટાબેઝ ફક્ત પહેલી વાર."""
-    chain, code, seen = [], friend.get("referred_by"), {friend.get("user_refer_code")}
-    for level in (1, 2, 3):
-        if not code or code in seen:
-            break
-        seen.add(code)
-        info = code_info(code)
-        if not info or info[0] == friend["$id"]:
-            break
-        chain.append((level, {"$id": info[0], "code": code}))
-        code = info[1]
+    [બદલ્યું] મિત્રની હજી ન અપાયેલી refer_tb રો પરથી. રેફર કરનારનો user id ઇમેઇલ પરથી (યાદમાંથી, ન હોય તો જ ડેટાબેઝ)."""
+    chain = []
+    for row in sorted(friend_unpaid_rows(friend["user_gmail_account"]), key=lambda r: safe_int(r.get("level"))):
+        level = safe_int(row.get("level"))
+        up_email = row.get("referrer_email")
+        if level not in (1, 2, 3) or not up_email or up_email == friend.get("user_gmail_account"):
+            continue
+        up_id = uid_of_email(up_email)
+        if not up_id or up_id == friend["$id"]:
+            continue
+        chain.append((level, {"$id": up_id, "email": up_email, "row": row}))
     return chain
 
 
@@ -2371,7 +2869,7 @@ def pay_referral_bonus(friend_id, friend=None, done_count=None):
     with user_lock(friend_id):
         if friend is None:
             friend = get_doc(C_USERS, friend_id)
-        if friend.get("refer_bonus_paid") is True or not friend.get("referred_by"):
+        if not friend_unpaid_rows(friend["user_gmail_account"]):
             return False
         if done_count is None:
             done_count = len(friend_done_set(friend_id, friend["user_gmail_account"]))
@@ -2387,16 +2885,20 @@ def pay_referral_bonus(friend_id, friend=None, done_count=None):
             if reward <= 0:
                 continue
             entry_id = f"rb_{friend_id}_{level}"  # નક્કી નંબર, એટલે એ જ ઇનામની બીજી નોંધ બની ન શકે
+            row_id = up["row"]["$id"]
             with user_lock(up["$id"]):
                 try:
                     get_doc(C_HISTORY, entry_id)
-                    continue  # આ ઇનામ પહેલેથી અપાઈ ગયું છે
+                    # આ ઇનામ પહેલેથી અપાઈ ગયું છે (રો ફક્ત ચિહ્નિત કરવાની બાકી હોય તો કરી દો)
+                    refer_row_mark_paid(row_id, time_str, stamp)
+                    rs_add(up["email"], reward)
+                    rg_mark_paid(up["email"], friend_id)
+                    continue
                 except AppwriteError as e:
                     if e.status != 404:
                         raise
                 fresh = get_doc(C_USERS, up["$id"])   # પૈસાનો હિસાબ હોવાથી હંમેશા તાજી રો
                 balance = float(fresh.get("total_balance_available") or 0)
-                earning = float(fresh.get("user_refer_earning") or 0)
                 hist_doc = create_doc(C_HISTORY, {
                     "user_gmail_account": fresh["user_gmail_account"],
                     "entry_id": entry_id, "type": "refer_bonus",
@@ -2407,8 +2909,6 @@ def pay_referral_bonus(friend_id, friend=None, done_count=None):
                 try:
                     upd = update_doc(C_USERS, up["$id"], {
                         "total_balance_available": round(balance + reward, 2),
-                        "user_refer_earning": int_if_whole(earning + reward),
-                        "user_refer_number": int_if_whole(float(fresh.get("user_refer_number") or 0) + 1),
                     })
                 except Exception:
                     try:
@@ -2416,9 +2916,12 @@ def pay_referral_bonus(friend_id, friend=None, done_count=None):
                     except Exception as e2:  # noqa
                         log.error("ઇનામની નોંધ પાછી કાઢી શકાઈ નહીં %s: %s", entry_id, e2)
                     raise
+                # [નવું] refer_tb ની રોમાં "ઇનામ અપાયું" + તારીખ/સમય, અને રેફરના આંકડા યાદમાં સીધા વધારો
+                refer_row_mark_paid(row_id, time_str, stamp)
+                rs_add(up["email"], reward)
                 # યાદ ભૂંસવાને બદલે નવી નોંધ સીધી યાદમાં ઉમેરો અને ઉપરના યુઝરની ખુલ્લી એપને તરત મોકલો
                 cache_add_history(fresh["user_gmail_account"], hist_doc)
-                rg_mark_paid(up["code"], friend_id)   # [નવું] રેફર કરનારની યાદીમાં "બોનસ મળ્યું"
+                rg_mark_paid(up["email"], friend_id)   # [નવું] રેફર કરનારની યાદીમાં "બોનસ મળ્યું"
                 try:
                     push_user(up["$id"], {
                         **user_push_basics(upd),
@@ -2429,9 +2932,10 @@ def pay_referral_bonus(friend_id, friend=None, done_count=None):
                     log.warning("રેફર ઇનામ એપને તરત મોકલી ન શકાયું: %s", e3)
                 log.info("રેફર ઇનામ ₹%s આપ્યું: લેવલ %s, %s", reward, level, fresh["user_gmail_account"])
 
-        update_doc(C_USERS, friend_id, {"refer_bonus_paid": True})
+        with _friend_rows_lock:     # [બદલ્યું] આ મિત્રની બધી રો પૂરી: હવે ન અપાયેલી કોઈ નહીં
+            _friend_rows[friend["user_gmail_account"]] = (time.time(), [])
         for _lv, up in chain:                      # [નવું] બધી યાદીમાં આ મિત્ર "બોનસ મળ્યું"
-            rg_mark_paid(up["code"], friend_id)
+            rg_mark_paid(up["email"], friend_id)
         with _done_lock:
             _done_offers.pop(friend_id, None)     # હવે આ મિત્ર માટે ગણતરી યાદ રાખવાની જરૂર નથી
     return True
@@ -2441,7 +2945,7 @@ def referral_progress(uid, friend, offer_name, prize=None):
     """મિત્રનો એક ટાસ્ક મંજૂર થયો: યાદમાં નામ ઉમેરો, અલગ ૩ ઓફર થાય તો જ બોનસ આપો."""
     if not counts_for_refer(offer_name, prize):
         return  # [નવું] ટેલિગ્રામ અને ૪૦ થી ઓછા ઇનામ વાળા ટાસ્ક રેફરમાં ગણાતા નથી
-    if not friend.get("referred_by") or friend.get("refer_bonus_paid") is True:
+    if not friend_unpaid_rows(friend["user_gmail_account"]):   # [બદલ્યું] refer_tb માં ન અપાયેલી રો ન હોય તો કંઈ નહીં
         return
     cnt = note_task_done(uid, friend["user_gmail_account"], offer_name)
     if cnt >= REFER_TASKS_NEEDED:
@@ -2451,7 +2955,7 @@ def referral_progress(uid, friend, offer_name, prize=None):
 def settle_friends(candidates):
     """(હમણાં બંધ ચક્ર માટે) ઇનામ બાકી હોય તેવા મિત્રોમાંથી, જેમના અલગ ટાસ્ક મંજૂર છે તેમને ઇનામ આપે."""
     cand = [f for f in candidates
-            if f.get("refer_bonus_paid") is not True and f.get("referred_by") and f.get("user_gmail_account")]
+            if f.get("user_gmail_account")]
     if not cand:
         return 0
     emails = [f["user_gmail_account"] for f in cand]
@@ -2475,11 +2979,12 @@ def settle_friends(candidates):
 
 def settle_referral_bonuses():
     """ધીમું સલામતી ચક્ર (હમણાં બંધ). ફક્ત એવા ખાતા વાંચે જેમને કોઈએ રેફર કર્યા છે અને ઇનામ બાકી છે."""
-    try:
-        users = list_docs(C_USERS, [q("equal", "refer_bonus_paid", [False]), q("notEqual", "referred_by", [""])])
-    except AppwriteError as e:
-        log.warning("હળવી શોધ ચાલી નહીં, જૂની રીત વાપરું છું: %s", e)
-        users = list_docs(C_USERS, [q("equal", "refer_bonus_paid", [False])])
+    # [બદલ્યું] refer_tb ની bonus_paid = false રો પરથી મિત્રોના ખાતા વાંચો
+    rows = list_docs(C_REFER, [q("equal", "bonus_paid", [False])])
+    emails = sorted({d.get("friend_email") for d in rows if d.get("friend_email")})
+    users = []
+    for i in range(0, len(emails), 100):
+        users += list_docs(C_USERS, [q("equal", "user_gmail_account", emails[i:i + 100])])
     return settle_friends(users)
 
 
@@ -2487,7 +2992,7 @@ def try_pay_own_referral(user, task_docs, seed=False):
     """મિત્રની પોતાની એપ ટાસ્ક તાજા કરે ત્યારે. શરત પૂરી ન હોય તો કોઈ વધારાનું read નહીં.
     seed=True (એડમિન રિફ્રેશ) હોય તો આ તાજી યાદીથી મંજૂર ટાસ્કના નામની યાદ ફરી બનાવે."""
     try:
-        if user.get("refer_bonus_paid") is True or not user.get("referred_by"):
+        if not friend_unpaid_rows(user["user_gmail_account"]):   # [બદલ્યું] refer_tb માં ન અપાયેલી રો ન હોય તો કંઈ નહીં
             return
         done = {norm(d.get("offer_taskname")) for d in task_docs
                 if classify_task_status(d.get("task_status")) == "completed"
