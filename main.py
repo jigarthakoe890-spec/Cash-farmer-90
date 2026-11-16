@@ -107,7 +107,7 @@ IMGBB_API_KEY = "8c5b5ce8657dbaa910dc1d2f2a1feef2"
 
 # [નવું] OneSignal: કોઈ યુઝર ટાસ્ક સબમિટ કરે ત્યારે તમારા ફોનમાં સૂચના મોકલવા માટે
 ONESIGNAL_APP_ID = "d922c3fa-58fe-4aa0-9aed-aeb0756746d2"
-ONESIGNAL_API_KEY = "os_v2_app_3ermh6sy7zfkbgxnv2yhkz2g2itozsynu3pelbvcmgxiyh3eagw4rhm3efeggsgfnqhzcvf7dddkxc3rnorwpmezvsle4curmjes23y"
+ONESIGNAL_API_KEY = "os_v2_app_3ermh6sy7zfkbgxnv2yhkz2g2kec4xl6jk3uquvcoroojolqztejsnhdkbpw5kogcwazhk7kpp23jqhb7ivbb6fzckecz75ufbwpldi"
 
 # લોગિન ટોકન સાચા છે કે નકલી તે ચકાસવા માટેનું ગુપ્ત લખાણ (મેં બનાવી આપ્યું છે, બદલવું જરૂરી નથી)
 SECRET_KEY = "1cee97246f1da3872c21ce3601ae4706aa484f93bb5ad6ec8d21ba0e616d4dc9"
@@ -3946,6 +3946,139 @@ if TELEGRAM_BOT_TOKEN:
 os.environ.setdefault("NO_BACKGROUND", "1")
 if not os.environ.get("NO_BACKGROUND"):
     start_background()
+
+
+# ----------------------------------------------------------------------------
+# [નવું] સર્વર શરૂ થતાંની સાથે જ OneSignal નું આખું સેટઅપ આપમેળે તપાસે છે અને પરિણામ લૉગની શરૂઆતમાં ચાંદી (silver) રંગમાં બતાવે છે,
+# જેથી ટાસ્ક સબમિટ કે ઉપાડ કરીને ચકાસવું ન પડે. કોઈને સાચી સૂચના મોકલાતી નથી.
+# રંગ બદલવા હોય તો ફક્ત નીચેની લાઇનનો આંકડો (256 રંગનો કોડ) બદલો
+# ----------------------------------------------------------------------------
+_C_SILVER = "\033[38;5;250m"
+
+
+def _osc_say(text):
+    try:
+        _live_add([[text, ""]])
+    except Exception:  # noqa
+        pass
+    print(_C_SILVER + text + _C_OFF, flush=True)
+
+
+def _onesignal_startup_check():
+    try:
+        import base64 as _b64
+        import uuid as _uuid
+        env_key = (os.environ.get("ONESIGNAL_API_KEY") or "").strip()
+        env_app = (os.environ.get("ONESIGNAL_APP_ID") or "").strip()
+        key = (env_key or ONESIGNAL_API_KEY).strip()
+        app_id = (env_app or ONESIGNAL_APP_ID).strip()
+        target = (os.environ.get("ONESIGNAL_ADMIN_EMAIL") or "cf_admin").strip()
+        bad = []  # જે સમસ્યા મળે તેની યાદી
+
+        _osc_say("======== OneSignal સેટઅપ તપાસ (સર્વર શરૂ થતાં) ========")
+        if not key or not app_id:
+            _osc_say("[ભૂલ] App ID અથવા API Key ખાલી છે. ફાઈલમાં ONESIGNAL_APP_ID અને ONESIGNAL_API_KEY લખો.")
+            _osc_say("========================================================")
+            return
+
+        # ૧) કઈ કિંમત વપરાય છે (ફાઈલની કે Environment ની)
+        _osc_say("App ID : %s  (%s)" % (app_id, "Environment માંથી" if env_app else "ફાઈલમાંથી"))
+        _osc_say("API Key: %s...%s  લંબાઈ %s  (%s)" % (key[:16], key[-4:], len(key), "Environment માંથી" if env_key else "ફાઈલમાંથી"))
+        _osc_say("એડમિન ઓળખ (External ID): %s" % target)
+        if env_key and env_key != (ONESIGNAL_API_KEY or "").strip():
+            _osc_say("[ચેતવણી] Environment ની ONESIGNAL_API_KEY ફાઈલની ચાવીથી અલગ છે. સર્વર Environment ની ચાવી વાપરે છે, ફાઈલની નહીં.")
+            bad.append("Environment ની જૂની ચાવી ફાઈલની નવી ચાવીને દબાવે છે")
+        if env_app and env_app != (ONESIGNAL_APP_ID or "").strip():
+            _osc_say("[ચેતવણી] Environment નો ONESIGNAL_APP_ID ફાઈલના App ID થી અલગ છે.")
+
+        # ૨) ચાવી આ જ App ID ની છે કે નહીં (ચાવીની શરૂઆતમાં App ID છુપાયેલો હોય છે)
+        if key.startswith("os_v2_app_"):
+            try:
+                _exp = _b64.b32encode(_uuid.UUID(app_id).bytes).decode().lower().rstrip("=")
+                _got = key[len("os_v2_app_"):][:len(_exp)]
+                if _got[:-1] == _exp[:-1]:
+                    _osc_say("[સાચું] ચાવી આ જ App ID ની છે.")
+                else:
+                    _osc_say("[ભૂલ] ચાવી આ App ID ની નથી (બીજી એપની ચાવી છે).")
+                    bad.append("ચાવી બીજી એપની છે")
+            except Exception:  # noqa
+                _osc_say("[ચેતવણી] App ID નો મેળ ચકાસી શકાયો નહીં (App ID નું લખાણ ખોટું હોઈ શકે).")
+        else:
+            _osc_say("[ચેતવણી] ચાવી os_v2_app_ થી શરૂ થતી નથી, એટલે App ID નો મેળ ચકાસી શકાયો નહીં.")
+
+        hdr = {"Authorization": "Key " + key, "Content-Type": "application/json"}
+
+        # ૩) OneSignal ચાવી સ્વીકારે છે કે નહીં (એવા નામે મોકલે જે કોઈનું નથી, એટલે કોઈને સૂચના જતી નથી)
+        try:
+            r1 = requests.post(
+                "https://api.onesignal.com/notifications?c=push",
+                headers=hdr,
+                json={"app_id": app_id, "target_channel": "push",
+                      "include_aliases": {"external_id": ["cf_startup_selftest_nouser"]},
+                      "contents": {"en": "selftest"}},
+                timeout=15,
+            )
+            if r1.status_code in (401, 403):
+                _osc_say("[ભૂલ] OneSignal એ ચાવી નકારી (સ્ટેટસ %s): %s" % (r1.status_code, r1.text[:110].replace("\n", " ")))
+                bad.append("ચાવી OneSignal ને સ્વીકાર્ય નથી")
+            elif r1.status_code == 404:
+                _osc_say("[ભૂલ] OneSignal માં આ App ID વાળી એપ મળી નહીં (સ્ટેટસ 404). App ID ખોટો છે.")
+                bad.append("App ID ખોટો છે")
+            elif r1.status_code >= 500:
+                _osc_say("[ચેતવણી] OneSignal સર્વરમાં હમણાં ભૂલ છે (સ્ટેટસ %s). થોડી વાર પછી ફરી તપાસો." % r1.status_code)
+            else:
+                _osc_say("[સાચું] OneSignal એ ચાવી સ્વીકારી, સૂચના બનાવવાની પરવાનગી છે (સ્ટેટસ %s)." % r1.status_code)
+        except Exception as e:  # noqa
+            _osc_say("[ભૂલ] OneSignal સુધી પહોંચી શકાયું નહીં (ઇન્ટરનેટ/નેટવર્ક): %s %s" % (e.__class__.__name__, str(e)[:100]))
+            bad.append("ઇન્ટરનેટથી OneSignal સુધી પહોંચાતું નથી")
+
+        # ૪) એડમિનનો ફોન જોડાયેલો અને Subscribed છે કે નહીં (સૂચના ખરેખર ત્યાં જ જાય છે)
+        try:
+            r2 = requests.get(
+                "https://api.onesignal.com/apps/%s/users/by/external_id/%s" % (app_id, requests.utils.quote(target, safe="")),
+                headers={"Authorization": "Key " + key},
+                timeout=15,
+            )
+            if r2.status_code == 200:
+                subs = [x for x in ((r2.json() or {}).get("subscriptions") or [])
+                        if "push" in str(x.get("type", "")).lower() or "android" in str(x.get("type", "")).lower()]
+                if not subs:
+                    _osc_say("[ભૂલ] '%s' મળ્યો, પણ તેની સાથે કોઈ push ફોન જોડાયેલો નથી." % target)
+                    bad.append("એડમિન ફોન જોડાયેલો નથી")
+                elif any(x.get("enabled") and (x.get("notification_types") in (None, 1)) for x in subs):
+                    _osc_say("[સાચું] એડમિન ફોન '%s' મળ્યો અને Subscribed છે (ફોન: %s)." % (target, len(subs)))
+                else:
+                    _osc_say("[ભૂલ] '%s' નો ફોન મળ્યો પણ Subscribed નથી (ફોનમાં સૂચનાઓ બંધ હોઈ શકે)." % target)
+                    bad.append("એડમિન ફોન Subscribed નથી")
+            elif r2.status_code == 404:
+                _osc_say("[ભૂલ] OneSignal માં '%s' External ID વાળો કોઈ ફોન નથી. એપમાં આ ઓળખથી લૉગિન થયું નથી." % target)
+                bad.append("એડમિન ફોન OneSignal સાથે જોડાયેલો નથી (External ID '%s' નથી)" % target)
+            elif r2.status_code in (401, 403):
+                _osc_say("[ભૂલ] એડમિન ફોન તપાસતી વખતે પણ ચાવી નકારાઈ (સ્ટેટસ %s)." % r2.status_code)
+            else:
+                _osc_say("[ચેતવણી] એડમિન ફોન તપાસી ન શકાયો (સ્ટેટસ %s)." % r2.status_code)
+        except Exception as e:  # noqa
+            _osc_say("[ચેતવણી] એડમિન ફોન તપાસી ન શકાયો: %s %s" % (e.__class__.__name__, str(e)[:100]))
+
+        # ૫) નિષ્કર્ષ
+        if not bad:
+            _osc_say("નિષ્કર્ષ: OneSignal નું બધું સેટઅપ તૈયાર છે. ટાસ્ક અને ઉપાડની સૂચના જશે.")
+        else:
+            _osc_say("નિષ્કર્ષ: સૂચના નહીં જાય. કારણ:")
+            for _i, _b in enumerate(bad, 1):
+                _osc_say("  %s) %s" % (_i, _b))
+            if any("ચાવી OneSignal ને સ્વીકાર્ય નથી" in _b for _b in bad):
+                _osc_say("  શક્યતા: ચાવી રદ/બદલાઈ ગઈ હોય, ચાવી પર Allowed IPs ની મર્યાદા હોય, અથવા ચાવી ખુલ્લી પડી હોય. OneSignal માં નવી App API Key બનાવો.")
+        _osc_say("========================================================")
+    except Exception as e:  # noqa
+        try:
+            _osc_say("[ચેતવણી] OneSignal તપાસ ચલાવી શકાઈ નહીં: %s %s" % (e.__class__.__name__, str(e)[:120]))
+        except Exception:  # noqa
+            pass
+
+
+# Press CTRL+C અને કુલ read ની લાઇનની નીચે દેખાય એટલે થોડી મોડી ચલાવો (પાછળના થ્રેડમાં, સર્વર અટકતો નથી)
+threading.Timer(3.0, _onesignal_startup_check).start()
 
 
 if __name__ == "__main__":
