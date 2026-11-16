@@ -106,8 +106,6 @@ APPWRITE_API_KEY = "standard_8e05de023d2eeebe5292137816c5f400e6a1749ff3b4594b9e4
 IMGBB_API_KEY = "8c5b5ce8657dbaa910dc1d2f2a1feef2"
 
 # [નવું] OneSignal: કોઈ યુઝર ટાસ્ક સબમિટ કરે ત્યારે તમારા ફોનમાં સૂચના મોકલવા માટે
-ONESIGNAL_APP_ID = "d922c3fa-58fe-4aa0-9aed-aeb0756746d2"
-ONESIGNAL_API_KEY = "os_v2_app_3ermh6sy7zfkbgxnv2yhkz2g2kec4xl6jk3uquvcoroojolqztejsnhdkbpw5kogcwazhk7kpp23jqhb7ivbb6fzckecz75ufbwpldi"
 
 # લોગિન ટોકન સાચા છે કે નકલી તે ચકાસવા માટેનું ગુપ્ત લખાણ (મેં બનાવી આપ્યું છે, બદલવું જરૂરી નથી)
 SECRET_KEY = "1cee97246f1da3872c21ce3601ae4706aa484f93bb5ad6ec8d21ba0e616d4dc9"
@@ -2309,11 +2307,11 @@ def _onesignal_exact_cause(app_id, key, target_email=None):
 
 def _onesignal_send(name, email, open_page="tasks"):
     try:
-        key = (os.environ.get("ONESIGNAL_API_KEY") or ONESIGNAL_API_KEY).strip()
-        app_id = (os.environ.get("ONESIGNAL_APP_ID") or ONESIGNAL_APP_ID).strip()
+        key = (os.environ.get("ONESIGNAL_API_KEY") or "").strip()
+        app_id = (os.environ.get("ONESIGNAL_APP_ID") or "").strip()
         log.info("[OneSignal] સૂચના મોકલવાનો પ્રયાસ શરૂ: %s (%s)", name, email)  # [નવું]
         if not key or not app_id:
-            log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = App ID અથવા API Key ખાલી છે. ફાઈલમાં ONESIGNAL_APP_ID અને ONESIGNAL_API_KEY લખો.")  # [નવું]
+            log.warning("[OneSignal] સૂચના નથી ગઈ: કારણ = App ID અથવા API Key ખાલી છે. Environment માં ONESIGNAL_APP_ID અને ONESIGNAL_API_KEY મૂકો.")  # [નવું]
             return
         # [નવું] કોને મોકલવી: Render માં ONESIGNAL_ADMIN_EMAIL મૂકો તો તે એડમિનને, નહીંતર સબમિટ કરનાર યુઝરના પોતાના ફોનને
         _os_target = (os.environ.get("ONESIGNAL_ADMIN_EMAIL") or "cf_admin").strip()
@@ -3970,14 +3968,14 @@ def _onesignal_startup_check():
         import uuid as _uuid
         env_key = (os.environ.get("ONESIGNAL_API_KEY") or "").strip()
         env_app = (os.environ.get("ONESIGNAL_APP_ID") or "").strip()
-        key = (env_key or ONESIGNAL_API_KEY).strip()
-        app_id = (env_app or ONESIGNAL_APP_ID).strip()
+        key = env_key
+        app_id = env_app
         target = (os.environ.get("ONESIGNAL_ADMIN_EMAIL") or "cf_admin").strip()
         bad = []  # જે સમસ્યા મળે તેની યાદી
 
         _osc_say("======== OneSignal સેટઅપ તપાસ (સર્વર શરૂ થતાં) ========")
         if not key or not app_id:
-            _osc_say("[ભૂલ] App ID અથવા API Key ખાલી છે. ફાઈલમાં ONESIGNAL_APP_ID અને ONESIGNAL_API_KEY લખો.")
+            _osc_say("[ભૂલ] App ID અથવા API Key ખાલી છે. Environment માં ONESIGNAL_APP_ID અને ONESIGNAL_API_KEY મૂકો.")
             _osc_say("========================================================")
             return
 
@@ -3985,11 +3983,9 @@ def _onesignal_startup_check():
         _osc_say("App ID : %s  (%s)" % (app_id, "Environment માંથી" if env_app else "ફાઈલમાંથી"))
         _osc_say("API Key: %s...%s  લંબાઈ %s  (%s)" % (key[:16], key[-4:], len(key), "Environment માંથી" if env_key else "ફાઈલમાંથી"))
         _osc_say("એડમિન ઓળખ (External ID): %s" % target)
-        if env_key and env_key != (ONESIGNAL_API_KEY or "").strip():
-            _osc_say("[ચેતવણી] Environment ની ONESIGNAL_API_KEY ફાઈલની ચાવીથી અલગ છે. સર્વર Environment ની ચાવી વાપરે છે, ફાઈલની નહીં.")
-            bad.append("Environment ની જૂની ચાવી ફાઈલની નવી ચાવીને દબાવે છે")
-        if env_app and env_app != (ONESIGNAL_APP_ID or "").strip():
-            _osc_say("[ચેતવણી] Environment નો ONESIGNAL_APP_ID ફાઈલના App ID થી અલગ છે.")
+        env_diff = False
+        if env_diff:
+            _osc_say("[માહિતી] Environment ની ચાવી ફાઈલની ચાવીથી અલગ છે. સર્વર Environment ની ચાવી વાપરે છે (ફાઈલની નહીં).")
 
         # ૨) ચાવી આ જ App ID ની છે કે નહીં (ચાવીની શરૂઆતમાં App ID છુપાયેલો હોય છે)
         if key.startswith("os_v2_app_"):
@@ -4020,7 +4016,7 @@ def _onesignal_startup_check():
             )
             if r1.status_code in (401, 403):
                 _osc_say("[ભૂલ] OneSignal એ ચાવી નકારી (સ્ટેટસ %s): %s" % (r1.status_code, r1.text[:110].replace("\n", " ")))
-                bad.append("ચાવી OneSignal ને સ્વીકાર્ય નથી")
+                bad.append("ચાવી OneSignal ને સ્વીકાર્ય નથી" + (" (સર્વર Environment ની ચાવી વાપરે છે, તે જ જૂની/ખોટી હોઈ શકે)" if env_diff else ""))
             elif r1.status_code == 404:
                 _osc_say("[ભૂલ] OneSignal માં આ App ID વાળી એપ મળી નહીં (સ્ટેટસ 404). App ID ખોટો છે.")
                 bad.append("App ID ખોટો છે")
